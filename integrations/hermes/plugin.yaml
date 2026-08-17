@@ -1,0 +1,25 @@
+name: airlock
+version: 0.2.0
+manifest_version: 2
+api_version: 1
+description: "Typed, human-reviewed authority requests through the local Airlock requester service"
+author: "Airlock contributors"
+license: MIT
+tags: [security, approvals, authority, airlock]
+provides_tools:
+  - airlock_capabilities
+  - airlock_create_request
+  - airlock_requests
+config_schema:
+  requester_url:
+    type: str
+    default: "http://127.0.0.1:8787"
+    description: "Loopback URL for the untrusted-node Airlock requester service"
+  timeout_seconds:
+    type: float
+    default: 5.0
+    description: "Per-request timeout, clamped to 0.25-30 seconds"
+  instructions_enabled:
+    type: bool
+    default: false
+    description: "Add the bounded Airlock usage rule to new Hermes system prompts"

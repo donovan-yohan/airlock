@@ -1,0 +1,8 @@
+{
+  "listen": "127.0.0.1:8787",
+  "state_dir": "../../.local/state/airlock/requester",
+  "trusted_public_key_file": "trusted.pub",
+  "request_max_ttl": "15m",
+  "catalog_max_ttl": "1h",
+  "receipt_max_ttl": "24h"
+}

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Install and verify Airlock integrations for Hermes, Claude Code, and Codex.">
+  <title>Get started · Airlock</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="shell nav">
+      <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">A</span>AIRLOCK</a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="getting-started.html" aria-current="page">Get started</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="approval-timing.html">Approval timing</a>
+        <a href="security.html">Security</a>
+        <a class="nav-cta" href="architecture.md">Mermaid source</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <header class="docs-hero">
+      <div class="shell">
+        <p class="eyebrow">Installation</p>
+        <h1>Wire the typed tools in. Keep authority out.</h1>
+        <p class="lede">The bootstrapper installs an explicit Airlock binary and user-scoped harness integrations. Persistent awareness is available, but never silently enabled.</p>
+      </div>
+    </header>
+
+    <div class="shell docs-layout">
+      <nav class="docs-nav" aria-label="Documentation">
+        <a href="getting-started.html" aria-current="page">Get started</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="approval-timing.html">Approval timing</a>
+        <a href="security.html">Security model</a>
+      </nav>
+
+      <article class="docs-content">
+        <section id="prerequisites">
+          <p class="kicker">01 / prerequisites</p>
+          <h2>Bring one known binary</h2>
+          <ul>
+            <li>Build the separate <code>airlock</code> Go binary and pass its absolute executable path.</li>
+            <li>Keep the requester URL as an explicit loopback IP and port, normally <code>http://127.0.0.1:8787</code>.</li>
+            <li>For <code>--instructions install</code>, install and enable the native <code>hermes-plugin-airlock</code> in the selected <code>HERMES_HOME</code>.</li>
+            <li>Ensure a non-empty global <code>~/.codex/AGENTS.override.md</code> is not shadowing <code>AGENTS.md</code>.</li>
+          </ul>
+        </section>
+
+        <section id="install">
+          <p class="kicker">02 / install</p>
+          <h2>Happy path with explicit awareness</h2>
+          <div class="code-panel">
+            <div class="code-title"><span>terminal</span><span>explicit opt-in</span></div>
+            <pre><code>python3 tools/airlock_bootstrap.py install \
+  --binary /absolute/path/to/airlock \
+  --instructions install</code></pre>
+          </div>
+          <p>This installs Claude Code and Codex MCP/plugin registrations, enables the bounded Hermes prompt section, and adds digest-owned blocks to user-global Claude and Codex instruction files.</p>
+          <div class="notice"><strong>Safe default:</strong> omit <code>--instructions install</code> and every instruction surface remains untouched.</div>
+          <div class="code-panel">
+            <div class="code-title"><span>terminal</span><span>registrations only</span></div>
+            <pre><code>python3 tools/airlock_bootstrap.py install \
+  --binary /absolute/path/to/airlock</code></pre>
+          </div>
+        </section>
+
+        <section id="preview">
+          <p class="kicker">03 / preview</p>
+          <h2>See every planned mutation first</h2>
+          <div class="code-panel">
+            <div class="code-title"><span>terminal</span><span>no writes or CLI calls</span></div>
+            <pre><code>python3 tools/airlock_bootstrap.py install \
+  --binary /absolute/path/to/airlock \
+  --instructions install \
+  --dry-run</code></pre>
+          </div>
+          <p>Dry-run prints the content-addressed copy path, state path, backup paths, harness commands, Hermes prerequisite, config toggle, and exact instruction-file diffs.</p>
+        </section>
+
+        <section id="profiles">
+          <p class="kicker">04 / profile targeting</p>
+          <h2>Make profile selection explicit</h2>
+          <p>Without <code>--home</code>, an ambient <code>HERMES_HOME</code> is honored. With an explicit <code>--home</code>, an ambient Hermes profile outside that home is refused to prevent disposable runs from touching live state.</p>
+          <div class="code-panel">
+            <div class="code-title"><span>terminal</span><span>intentional external Hermes profile</span></div>
+            <pre><code>python3 tools/airlock_bootstrap.py \
+  --home /tmp/isolated-home \
+  --hermes-home /explicit/hermes/profile \
+  install \
+  --binary /absolute/path/to/airlock \
+  --instructions install</code></pre>
+          </div>
+        </section>
+
+        <section id="verify-remove">
+          <p class="kicker">05 / verify and remove</p>
+          <h2>Doctor before claims. Ownership before removal.</h2>
+          <div class="code-panel">
+            <div class="code-title"><span>terminal</span><span>lifecycle</span></div>
+            <pre><code>python3 tools/airlock_bootstrap.py doctor
+python3 tools/airlock_bootstrap.py uninstall</code></pre>
+          </div>
+          <p><code>doctor</code> validates package invariants, exact plugin identity, MCP registration, three-tool discovery, Hermes prompt state, and managed block digests. Uninstall refuses missing, edited, unowned, or ambiguous content before removing anything.</p>
+        </section>
+
+        <section id="runtime">
+          <p class="kicker">06 / runtime</p>
+          <h2>Registration is not deployment</h2>
+          <p>The stdio MCP process can initialize and advertise its tools while the requester is offline. Actual capability, request, and receipt operations require the local requester service:</p>
+          <div class="code-panel">
+            <div class="code-title"><span>terminal</span><span>separate Airlock repository</span></div>
+            <pre><code>airlock requester serve --config /path/to/requester.json</code></pre>
+          </div>
+          <p>Trusted-node deployment, keys, adapters, review UI, and manual provider execution remain separate operational responsibilities.</p>
+        </section>
+      </article>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-row"><span>Airlock installation guide</span><span><a href="security.html">Read the security model</a></span></div>
+  </footer>
+</body>
+</html>

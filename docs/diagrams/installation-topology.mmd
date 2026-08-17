@@ -1,0 +1,46 @@
+flowchart TD
+  Source["Explicit executable<br/>airlock binary"]
+  Repo["This plugin checkout<br/>dual manifests + shared skill"]
+  Bootstrap["airlock_bootstrap.py"]
+  Validate["Preflight validation<br/>loopback URL, collisions, ownership"]
+  Versioned["Content-addressed binary<br/>~/.local/share/airlock/versions/&lt;sha256&gt;/airlock"]
+  Mode{"--instructions mode"}
+  Registrations["MCP + marketplace/plugin registrations"]
+  State[("install-state.json<br/>owned paths, selectors, digests")]
+  Backups[("Mode-0600 persistent<br/>config backups")]
+
+  subgraph C["Claude Code user scope"]
+    ClaudeMCP["airlock stdio MCP registration"]
+    ClaudePlugin["airlock@airlock plugin"]
+    ClaudeRules["~/.claude/CLAUDE.md<br/>digest-owned marker block"]
+  end
+
+  subgraph X["Codex user scope"]
+    CodexMCP["airlock stdio MCP registration"]
+    CodexPlugin["airlock@airlock plugin"]
+    CodexRules["~/.codex/AGENTS.md<br/>digest-owned marker block"]
+  end
+
+  subgraph H["Selected Hermes profile"]
+    HermesPlugin["Native hermes-plugin-airlock<br/>installed and enabled prerequisite"]
+    HermesToggle["instructions_enabled = true<br/>bounded prompt section"]
+  end
+
+  Source -->|"supplies explicit executable input"| Bootstrap
+  Repo -->|"supplies marketplace and plugin metadata"| Bootstrap
+  Bootstrap -->|"runs before any mutation"| Validate
+  Validate -->|"copies mode 0500 by content hash"| Versioned
+  Validate -->|"selects explicit or default behavior"| Mode
+  Mode -->|"skip — default"| Registrations
+  Mode -->|"install — explicit opt-in"| HermesPlugin
+  HermesPlugin -->|"proves prompt extension can activate"| HermesToggle
+  Mode -->|"installs managed Claude guidance"| ClaudeRules
+  Mode -->|"installs managed Codex guidance"| CodexRules
+  Versioned -->|"pins exact executable path"| ClaudeMCP
+  Versioned -->|"pins exact executable path"| CodexMCP
+  Registrations -->|"configures user MCP"| ClaudeMCP
+  Registrations -->|"configures user MCP"| CodexMCP
+  Repo -->|"installs expected selector"| ClaudePlugin
+  Repo -->|"installs expected selector"| CodexPlugin
+  Bootstrap -->|"records only installer-owned state"| State
+  Bootstrap -->|"snapshots candidate config before writes"| Backups

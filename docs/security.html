@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Security model and fail-closed invariants for Airlock requester integrations.">
+  <title>Security model · Airlock</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="shell nav">
+      <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">A</span>AIRLOCK</a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="getting-started.html">Get started</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="approval-timing.html">Approval timing</a>
+        <a href="security.html" aria-current="page">Security</a>
+        <a class="nav-cta" href="architecture.md">Mermaid source</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <header class="docs-hero">
+      <div class="shell">
+        <p class="eyebrow">Security model</p>
+        <h1>Assume the model-facing side is compromised.</h1>
+        <p class="lede">Airlock is useful only if the requester node cannot turn text, state, or transport access into trusted execution. The integration is designed around that assumption.</p>
+      </div>
+    </header>
+
+    <div class="shell docs-layout">
+      <nav class="docs-nav" aria-label="Documentation">
+        <a href="getting-started.html">Get started</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="approval-timing.html">Approval timing</a>
+        <a href="security.html" aria-current="page">Security model</a>
+      </nav>
+
+      <article class="docs-content">
+        <section id="model">
+          <p class="kicker">Threat model</p>
+          <h2>Untrusted by location, content, and intent</h2>
+          <p>The harness, skill text, MCP process, requester service, capability labels, request descriptions, and model-generated fields all live on or originate from the untrusted side. Signed catalog metadata proves origin and integrity; it does not turn descriptive text into instructions.</p>
+          <div class="notice"><strong>Core rule:</strong> model-visible text can request authority. It can never grant authority.</div>
+        </section>
+
+        <section id="surface">
+          <p class="kicker">Model-facing surface</p>
+          <h2>Exactly three tools</h2>
+          <ul class="tool-list">
+            <li><strong><code>airlock_capabilities</code></strong><br>Discover sanitized signed capability entries before asking for credentials or inventing a bypass.</li>
+            <li><strong><code>airlock_create_request</code></strong><br>Submit only the strict typed fields required by an exact matching capability.</li>
+            <li><strong><code>airlock_requests</code></strong><br>Read sanitized request and receipt state without trusted action text or reusable approvals.</li>
+          </ul>
+          <p>There are no hooks, provider clients, shell commands, command strings, trusted-node URLs, secret headers, or direct execution methods in the model surface.</p>
+        </section>
+
+        <section id="network">
+          <p class="kicker">Requester transport</p>
+          <h2>Loopback, explicit, and boring</h2>
+          <ul>
+            <li>Requester URLs must be explicit <code>http://127.0.0.1:&lt;port&gt;</code> values.</li>
+            <li>Credentials, URL user-info, query strings, fragments, redirects, and inherited proxies are refused.</li>
+            <li>The MCP server can advertise tools while the requester is offline, but returns sanitized unavailable errors for live operations.</li>
+            <li>The requester never connects directly to an external provider on the agent's behalf.</li>
+          </ul>
+        </section>
+
+        <section id="trusted-side">
+          <p class="kicker">Trusted side</p>
+          <h2>Revalidate and reconstruct locally</h2>
+          <p>The trusted node pulls requests rather than accepting inbound trusted action text. It verifies the signed catalog context, request digest, expiry, capability identity, and a versioned local adapter's constraints. Request IDs are idempotent and cannot be reused with a different bound digest.</p>
+          <p>Only then does it render a locally reconstructed action for human review. Requester-supplied shell commands are never executed because no generic command field exists.</p>
+        </section>
+
+        <section id="human">
+          <p class="kicker">Human boundary</p>
+          <h2>Two deliberate human acts</h2>
+          <ol>
+            <li><strong>Decision:</strong> inspect the validated request and reconstructed action, then approve or reject.</li>
+            <li><strong>Execution:</strong> after approval, manually perform the provider action and record the outcome.</li>
+          </ol>
+          <p>The services do not bridge those steps automatically. See the <a href="approval-timing.html">approval timing diagram</a> for the full sequence.</p>
+        </section>
+
+        <section id="installer">
+          <p class="kicker">Installer integrity</p>
+          <h2>Fail closed around user-owned files</h2>
+          <ul>
+            <li>The binary source must be an explicit executable and is installed content-addressably.</li>
+            <li>Only exact <code>airlock@airlock</code> plugin identity is considered installer-owned.</li>
+            <li>Instruction blocks require both managed markers and matching path/digest state.</li>
+            <li>Unrecorded, edited, malformed, missing, or symlinked instruction targets are refused.</li>
+            <li>A failed Hermes config read aborts before plugin, MCP, file, or ownership state removal.</li>
+            <li>Default install and update do not read or back up global instruction files.</li>
+          </ul>
+        </section>
+
+        <section id="receipts">
+          <p class="kicker">Evidence semantics</p>
+          <h2>Receipts describe workflow state, not external truth</h2>
+          <p><code>approved</code> proves a trusted reviewer decision. <code>manually_executed</code> proves that an operator recorded a manual attempt. Neither proves the provider accepted the action or that the intended state exists.</p>
+          <p>Every success claim therefore ends with an independent ordinary read-only verification path.</p>
+        </section>
+      </article>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-row"><span>Airlock security model</span><span><a href="approval-timing.html">Trace the human approval path</a></span></div>
+  </footer>
+</body>
+</html>

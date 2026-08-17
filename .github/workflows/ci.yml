@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.x'
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: ./scripts/smoke-local.sh
+
+  integrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.x'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - name: Validate Claude and Codex packaging
+        run: |
+          python3 -m unittest discover -s tests -v
+          python3 tools/airlock_bootstrap.py validate
+      - name: Test Hermes integration
+        working-directory: integrations/hermes
+        run: |
+          uv lock --check
+          uv run --locked pytest -q
+          uv run --locked ruff check hermes_plugin_airlock tests
+          uv run --locked python -m compileall -q __init__.py hermes_plugin_airlock tests
+      - name: Test Hermes integration against the Go service
+        run: |
+          go build -o /tmp/airlock ./cmd/airlock
+          cd integrations/hermes
+          AIRLOCK_BINARY=/tmp/airlock uv run --locked pytest -q tests/test_real_airlock.py
+      - name: Check out the pinned Hermes runtime
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: NousResearch/hermes-agent
+          ref: cb47f59ffa1056732c0a5194d2a1847dc64c2c37 # pragma: allowlist secret
+          path: .ci/hermes-agent
+          persist-credentials: false
+      - name: Validate Hermes plugin manifest
+        run: |
+          uv run --locked --directory .ci/hermes-agent hermes plugins doctor "$GITHUB_WORKSPACE/integrations/hermes" --ci

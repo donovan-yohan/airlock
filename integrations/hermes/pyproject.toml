@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-plugin-airlock"
+version = "0.2.0"
+description = "Hermes tools for typed, human-reviewed Airlock authority requests"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "Airlock contributors"}]
+dependencies = []
+
+[project.entry-points."hermes_agent.plugins"]
+airlock = "hermes_plugin_airlock:register"
+
+[tool.setuptools]
+packages = ["hermes_plugin_airlock"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff.lint]
+ignore = ["N999"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pyyaml>=6.0.3",
+    "ruff>=0.16.3",
+]

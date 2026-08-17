@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Timing diagram for Airlock approval requests, human review, manual execution, receipts, and independent verification.">
+  <title>Approval timing · Airlock</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="shell nav">
+      <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">A</span>AIRLOCK</a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="getting-started.html">Get started</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="approval-timing.html" aria-current="page">Approval timing</a>
+        <a href="security.html">Security</a>
+        <a class="nav-cta" href="approval-timing.md">Mermaid source</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <header class="docs-hero">
+      <div class="shell">
+        <p class="eyebrow">Human-in-the-loop sequence</p>
+        <h1>Approval is a decision. Execution is a second human act.</h1>
+        <p class="lede">Airlock deliberately separates request persistence, trusted validation, human approval, manual provider execution, and independent verification.</p>
+      </div>
+    </header>
+
+    <div class="shell docs-layout">
+      <nav class="docs-nav" aria-label="Documentation">
+        <a href="getting-started.html">Get started</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="approval-timing.html" aria-current="page">Approval timing</a>
+        <a href="security.html">Security model</a>
+        <a href="approval-timing.md">Mermaid source</a>
+      </nav>
+
+      <article class="docs-content">
+        <section id="sequence">
+          <p class="kicker">End-to-end timing</p>
+          <h2>Where the human enters the loop</h2>
+          <p>The first human gate is the authority decision: inspect the validated typed fields and locally reconstructed action, then approve or reject. The second gate is provider execution: after approval, the operator performs the action manually and records the outcome.</p>
+          <a class="diagram-link" href="assets/diagrams/approval-timing.svg">Open full-size SVG ↗</a>
+          <figure class="diagram timing">
+            <img src="assets/diagrams/approval-timing.svg" alt="Sequence diagram showing capability discovery, typed request creation, trusted validation, human approval, manual provider execution, sanitized receipts, and independent verification.">
+          </figure>
+          <div class="notice"><strong>No automatic handoff:</strong> an <code>approved</code> receipt does not invoke the provider. Airlock exposes no provider-execution API.</div>
+        </section>
+
+        <section id="states">
+          <p class="kicker">Receipt semantics</p>
+          <h2>What each state actually proves</h2>
+          <table>
+            <thead><tr><th>State</th><th>What it proves</th><th>What it does not prove</th></tr></thead>
+            <tbody>
+              <tr><td><code>pending</code></td><td>The requester persisted a typed request.</td><td>Review, approval, or execution.</td></tr>
+              <tr><td><code>approved</code></td><td>A trusted reviewer recorded approval for the validated request.</td><td>That anyone executed the provider action.</td></tr>
+              <tr><td><code>denied</code></td><td>The trusted side or reviewer declined the request.</td><td>Any external change.</td></tr>
+              <tr><td><code>manually_executed</code></td><td>The operator recorded a manual execution attempt.</td><td>That the provider accepted it or the intended effect exists.</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="failure-paths">
+          <p class="kicker">Failure paths</p>
+          <h2>Failures stop before authority drifts</h2>
+          <ul>
+            <li>Expired, replayed, malformed, or adapter-invalid requests are rejected before human review.</li>
+            <li>A reviewer can reject without exposing credentials or trusted action text to the requester.</li>
+            <li>An approved request can remain unexecuted; status polling cannot convert it into execution.</li>
+            <li>If the manual provider action fails, do not record <code>manually_executed</code>; verify external state before retrying.</li>
+            <li>Receipts are sanitized and never include a reusable approval or executable command.</li>
+            <li>External verification remains independent of the human-entered outcome receipt.</li>
+          </ul>
+        </section>
+      </article>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-row"><span>Airlock approval timing</span><span><a href="architecture.html">View system architecture</a></span></div>
+  </footer>
+</body>
+</html>

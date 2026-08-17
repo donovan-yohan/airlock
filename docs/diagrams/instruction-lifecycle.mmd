@@ -1,0 +1,20 @@
+flowchart LR
+  Clean["No Airlock markers<br/>no instruction ownership record"]
+  Managed["Canonical managed block<br/>path + SHA-256 recorded"]
+  Updated["Canonical block refreshed<br/>new digest recorded"]
+  Removed["Owned block removed<br/>surrounding bytes preserved"]
+  Unowned["Airlock markers exist<br/>without ownership state"]
+  Tampered["Managed block missing<br/>or digest mismatch"]
+  Refused["Fail closed<br/>no instruction mutation"]
+  HermesOn["Hermes prompt section enabled<br/>prior boolean recorded"]
+  HermesRestored["Prior Hermes boolean restored<br/>after last managed harness"]
+
+  Clean -->|"explicit install with clear target"| Managed
+  Managed -->|"reinstall or update with matching digest"| Updated
+  Updated -->|"becomes current managed state"| Managed
+  Managed -->|"uninstall with matching digest"| Removed
+  Managed -->|"user edits or deletes owned block"| Tampered
+  Unowned -->|"install refuses adoption"| Refused
+  Tampered -->|"install, update, doctor, or uninstall detects drift"| Refused
+  Managed -->|"shares instruction lifecycle"| HermesOn
+  HermesOn -->|"last managed harness is uninstalled"| HermesRestored

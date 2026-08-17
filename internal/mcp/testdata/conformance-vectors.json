@@ -1,0 +1,114 @@
+[
+  {
+    "name": "valid",
+    "tool": "airlock_capabilities",
+    "arguments": {},
+    "fixture": "valid",
+    "want_error": false,
+    "want_fragment": "catalog_fresh"
+  },
+  {
+    "name": "valid-create",
+    "tool": "airlock_create_request",
+    "arguments": {
+      "capability_id": "github:example-owner",
+      "action": "github.repo.add_collaborator",
+      "repository": "project",
+      "permission": "push",
+      "reason": "bounded request",
+      "ttl_seconds": 600
+    },
+    "fixture": "valid",
+    "want_error": false,
+    "want_fragment": "recorded_state"
+  },
+  {
+    "name": "malformed",
+    "tool": "airlock_create_request",
+    "arguments": {
+      "capability_id": "github:example-owner",
+      "action": "github.repo.add_collaborator",
+      "repository": "project",
+      "permission": "push",
+      "reason": "bounded request",
+      "unexpected": true
+    },
+    "fixture": "valid",
+    "want_error": true,
+    "want_code": "invalid_arguments"
+  },
+  {
+    "name": "oversized",
+    "tool": "airlock_create_request",
+    "arguments": {
+      "capability_id": "github:example-owner",
+      "action": "github.repo.add_collaborator",
+      "repository": "project",
+      "permission": "push",
+      "reason_fixture": "oversized"
+    },
+    "fixture": "valid",
+    "want_error": true,
+    "want_code": "invalid_arguments"
+  },
+  {
+    "name": "control-character",
+    "tool": "airlock_create_request",
+    "arguments": {
+      "capability_id": "github:example-owner",
+      "action": "github.repo.add_collaborator",
+      "repository": "project",
+      "permission": "push",
+      "reason_fixture": "control"
+    },
+    "fixture": "valid",
+    "want_error": true,
+    "want_code": "invalid_arguments"
+  },
+  {
+    "name": "secret-shaped-reason",
+    "tool": "airlock_create_request",
+    "arguments": {
+      "capability_id": "github:example-owner",
+      "action": "github.repo.add_collaborator",
+      "repository": "project",
+      "permission": "push",
+      "reason_fixture": "secret"
+    },
+    "fixture": "valid",
+    "want_error": true,
+    "want_code": "invalid_arguments"
+  },
+  {
+    "name": "expired",
+    "tool": "airlock_requests",
+    "arguments": {
+      "limit": 1
+    },
+    "fixture": "expired",
+    "want_error": false,
+    "want_fragment": "\"effective_state\":\"expired\""
+  },
+  {
+    "name": "unknown-action",
+    "tool": "airlock_create_request",
+    "arguments": {
+      "capability_id": "github:example-owner",
+      "action": "shell.run",
+      "repository": "project",
+      "permission": "push",
+      "reason": "bounded request"
+    },
+    "fixture": "valid",
+    "want_error": true,
+    "want_code": "invalid_arguments"
+  },
+  {
+    "name": "service-down",
+    "tool": "airlock_capabilities",
+    "arguments": {},
+    "fixture": "down",
+    "want_error": true,
+    "want_code": "requester_unavailable"
+  }
+]

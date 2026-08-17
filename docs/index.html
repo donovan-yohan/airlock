@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Airlock lets untrusted AI agents request narrow authority without receiving credentials or execution access.">
+  <title>Airlock — authority without handing agents the keys</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="shell nav">
+      <a class="brand" href="index.html" aria-label="Airlock home">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        AIRLOCK
+      </a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="getting-started.html">Get started</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="approval-timing.html">Approval timing</a>
+        <a href="security.html">Security</a>
+        <a class="nav-cta" href="architecture.md">Mermaid source</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="shell hero">
+      <div>
+        <p class="eyebrow">typed authority requests · human execution</p>
+        <h1>Authority without handing agents the keys.</h1>
+        <p class="lede">Airlock gives untrusted AI agents a narrow way to ask for privileged work. A trusted node validates the request. A human decides. A human executes. Credentials never cross the boundary.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="getting-started.html">Install the integrations</a>
+          <a class="button" href="approval-timing.html">See the approval path</a>
+        </div>
+        <p class="hero-note">Manual-first by design. An approval receipt is not execution, and a manual receipt is not external proof.</p>
+      </div>
+
+      <div class="flow-card" aria-label="Airlock request flow overview">
+        <div class="flow-head">
+          <strong>request / review / verify</strong>
+          <span class="pill">manual-first</span>
+        </div>
+        <div class="flow-stack">
+          <div class="flow-step">
+            <span class="step-number">01</span>
+            <div><strong>Agent requests</strong><span>exact typed capability fields</span></div>
+            <span class="flow-arrow" aria-hidden="true">↓</span>
+          </div>
+          <div class="flow-step">
+            <span class="step-number">02</span>
+            <div><strong>Trusted node validates</strong><span>local adapter, constraints, expiry</span></div>
+            <span class="flow-arrow" aria-hidden="true">↓</span>
+          </div>
+        </div>
+        <div class="boundary-label">human authority boundary</div>
+        <div class="flow-stack">
+          <div class="flow-step human-gate">
+            <span class="step-number">03</span>
+            <div><strong>Human reviews</strong><span>approve or reject reconstructed action</span></div>
+            <span class="flow-arrow" aria-hidden="true">↓</span>
+          </div>
+          <div class="flow-step human-gate">
+            <span class="step-number">04</span>
+            <div><strong>Human executes</strong><span>manual provider action; no execution API</span></div>
+            <span class="flow-arrow" aria-hidden="true">↓</span>
+          </div>
+          <div class="flow-step">
+            <span class="step-number">05</span>
+            <div><strong>Verifier observes</strong><span>independent read-only external state</span></div>
+            <span class="flow-arrow" aria-hidden="true">✓</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell">
+        <div class="section-intro">
+          <div>
+            <p class="kicker">The boundary</p>
+            <h2>Requests can cross. Authority cannot.</h2>
+          </div>
+          <p>The requester side can discover signed capabilities, submit bounded typed requests, and read sanitized receipts. It cannot receive trusted credentials, approval tokens, provider execution URLs, or requester-supplied shell access.</p>
+        </div>
+        <div class="card-grid">
+          <article class="card">
+            <span class="card-icon" aria-hidden="true">{ }</span>
+            <h3>Typed, not arbitrary</h3>
+            <p>Each capability has a strict schema and local trusted adapter. There is no generic command field hiding under a nicer name.</p>
+          </article>
+          <article class="card">
+            <span class="card-icon" aria-hidden="true">H</span>
+            <h3>Human at both gates</h3>
+            <p>A reviewer grants or rejects authority. After approval, an operator manually performs the locally reconstructed action.</p>
+          </article>
+          <article class="card">
+            <span class="card-icon" aria-hidden="true">✓</span>
+            <h3>Receipts are not reality</h3>
+            <p><code>manually_executed</code> records an operator claim. A separate read-only observation establishes the external result.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="how-it-works">
+      <div class="shell">
+        <div class="section-intro">
+          <div>
+            <p class="kicker">How it works</p>
+            <h2>One narrow path through the wall.</h2>
+          </div>
+          <p>Airlock keeps model-facing integration boring on purpose: three tools, loopback transport, typed state, and no automatic escalation when another tool fails.</p>
+        </div>
+        <div class="steps">
+          <article class="process-step">
+            <h3>Discover</h3>
+            <p>The agent calls <code>airlock_capabilities</code> and treats every returned label and description as untrusted data.</p>
+          </article>
+          <article class="process-step">
+            <h3>Request</h3>
+            <p>The agent submits exact typed fields through <code>airlock_create_request</code>. The requester persists an immutable ID, digest, nonce, and bounded expiry.</p>
+          </article>
+          <article class="process-step">
+            <h3>Review and act</h3>
+            <p>The trusted node revalidates against local constraints and renders an action locally. A human reviews it, then manually executes it if approved.</p>
+          </article>
+          <article class="process-step">
+            <h3>Observe</h3>
+            <p>The agent reads sanitized state through <code>airlock_requests</code>, then verifies the intended effect through a separate ordinary read-only path.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell">
+        <div class="section-intro">
+          <div>
+            <p class="kicker">Cross-harness</p>
+            <h2>Same contract. Native surfaces.</h2>
+          </div>
+          <p>Claude Code and Codex use the typed stdio MCP server plus a shared compact skill. Hermes uses a thin native plugin with the same three tools and an optional bounded prompt section.</p>
+        </div>
+        <div class="metrics" aria-label="Airlock integration facts">
+          <div class="metric"><strong>3</strong><span>model-facing tools</span></div>
+          <div class="metric"><strong>0</strong><span>execution hooks</span></div>
+          <div class="metric"><strong>0</strong><span>generic shell fields</span></div>
+          <div class="metric"><strong>1</strong><span>explicit human path</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell callout">
+        <div>
+          <p class="kicker">Explicit opt-in</p>
+          <h2>Install awareness without smuggling authority.</h2>
+          <p>The happy path opts into managed user-global guidance. The installer default remains <code>--instructions skip</code>; it never edits project-local instructions.</p>
+        </div>
+        <div class="code-panel">
+          <div class="code-title"><span>terminal</span><span>stdlib-only bootstrapper</span></div>
+          <pre><code>python3 tools/airlock_bootstrap.py install \
+  --binary /absolute/path/to/airlock \
+  --instructions install</code></pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-row">
+      <span>Airlock · manual-first authority requests</span>
+      <span>Package 0.2.0 · local requester deployment required</span>
+    </div>
+  </footer>
+</body>
+</html>

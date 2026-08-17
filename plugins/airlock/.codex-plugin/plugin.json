@@ -1,0 +1,18 @@
+{
+  "name": "airlock",
+  "version": "0.2.0",
+  "description": "Persistent awareness and procedure for typed Airlock authority requests.",
+  "author": {
+    "name": "Airlock contributors",
+    "url": "https://github.com/donovan-yohan/airlock"
+  },
+  "repository": "https://github.com/donovan-yohan/airlock",
+  "license": "MIT",
+  "keywords": [
+    "authority",
+    "security",
+    "airlock",
+    "mcp"
+  ],
+  "skills": "./skills/"
+}

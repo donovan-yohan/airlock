@@ -1,0 +1,39 @@
+flowchart TB
+  subgraph U["Untrusted requester node"]
+    direction LR
+    User["User"]
+    Harness["Hermes / Claude Code / Codex"]
+    Awareness["Native plugin or shared skill<br/>awareness only"]
+    MCP["airlock mcp<br/>typed stdio server"]
+    Requester["Requester service<br/>127.0.0.1:8787"]
+    RequestState[("Immutable requester state<br/>typed requests + sanitized receipts")]
+  end
+
+  subgraph T["Trusted node"]
+    direction LR
+    Trusted["Trusted Airlock service"]
+    Adapter["Versioned local adapters<br/>and constraints"]
+    Review["Human review UI<br/>locally reconstructed action"]
+    TrustedState[("Trusted decision state")]
+  end
+
+  Human["Human reviewer / operator"]
+  Provider["External provider"]
+  Verify["Independent read-only verifier"]
+
+  User -->|"asks for an authority-requiring operation"| Harness
+  Awareness -->|"adds bounded usage guidance"| Harness
+  Harness -->|"calls exactly three typed tools"| MCP
+  MCP -->|"sends loopback HTTP JSON"| Requester
+  Requester -->|"persists immutable typed request"| RequestState
+  Trusted -->|"pulls pending requests"| Requester
+  Requester -->|"returns typed request and signed catalog data"| Trusted
+  Trusted -->|"checks local adapter and constraints"| Adapter
+  Trusted -->|"renders a locally reconstructed action"| Review
+  Human -->|"decides and records manual outcome"| Review
+  Review -->|"persists trusted decision"| TrustedState
+  Human -->|"manually performs approved action"| Provider
+  Trusted -->|"publishes sanitized signed receipt"| Requester
+  Harness -->|"polls sanitized request state"| MCP
+  Verify -->|"reads ordinary external state"| Provider
+  Verify -->|"reports observed effect"| User

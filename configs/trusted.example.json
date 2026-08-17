@@ -1,0 +1,26 @@
+{
+  "listen": "127.0.0.1:8788",
+  "state_dir": "../../.local/state/airlock/trusted",
+  "private_key_file": "trusted.key",
+  "requester_url": "https://requester-node.example.invalid",
+  "poll_interval": "2s",
+  "request_max_ttl": "15m",
+  "catalog_ttl": "1h",
+  "receipt_ttl": "24h",
+  "allowed_logins": [
+    "reviewer@example.invalid"
+  ],
+  "capabilities": [
+    {
+      "id": "github:example-owner",
+      "display_name": "Example GitHub authority",
+      "adapter": "github.repo.add_collaborator/v1",
+      "owner": "example-owner",
+      "collaborator": "example-agent",
+      "permissions": [
+        "pull",
+        "push"
+      ]
+    }
+  ]
+}

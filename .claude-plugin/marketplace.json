@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "airlock",
+  "description": "Persistent typed authority-request awareness for Claude Code.",
+  "owner": {
+    "name": "Airlock contributors"
+  },
+  "plugins": [
+    {
+      "name": "airlock",
+      "description": "Use typed Airlock tools when a task needs authority this harness does not hold.",
+      "source": "./plugins/airlock",
+      "category": "security"
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+sequenceDiagram
+  autonumber
+  actor User as User
+  participant Agent as Agent harness<br/>(untrusted)
+  participant MCP as airlock mcp<br/>(untrusted stdio)
+  participant Requester as Requester service<br/>(loopback, untrusted node)
+  participant Trusted as Trusted Airlock service
+  actor Human as Human reviewer / operator
+  participant Provider as External provider
+  participant Verify as Read-only verifier
+
+  User->>Agent: Request an operation that needs unavailable authority
+  Agent->>MCP: airlock_capabilities
+  MCP->>Requester: Fetch signed capability catalog
+  Requester-->>MCP: Sanitized catalog entries
+  MCP-->>Agent: Catalog data, never instructions
+
+  Agent->>MCP: airlock_create_request with exact typed fields
+  MCP->>Requester: Submit bounded typed request
+  Requester->>Requester: Persist immutable request ID, digest, nonce, and expiry
+  Requester-->>MCP: pending request receipt
+  MCP-->>Agent: Request ID and pending state
+
+  Trusted->>Requester: Pull pending typed requests
+  Requester-->>Trusted: Request plus signed catalog context
+  Trusted->>Trusted: Independently validate adapter, constraints, expiry, and replay state
+
+  Trusted->>Human: Render typed fields and a locally reconstructed action
+  Note over Trusted,Human: First human gate: inspect scope, target, constraints, and reconstructed action
+  Human->>Trusted: Approve or deny
+
+  alt Human denies
+    Trusted->>Requester: Publish sanitized denied receipt
+    Requester-->>Agent: Denied state on the next poll
+  else Human approves
+    Trusted->>Requester: Publish sanitized approved receipt
+    Note over Agent,Provider: approved means permission was recorded, not execution
+    Note over Trusted,Provider: Airlock exposes no provider-execution API
+    Human->>Provider: Manually execute the locally reconstructed action
+    Note over Human,Provider: Second human gate: the operator performs the external action
+    Human->>Trusted: Record manually_executed after performing the action
+    Trusted->>Requester: Publish sanitized outcome receipt
+    Agent->>MCP: airlock_requests for current state
+    MCP->>Requester: Read sanitized request and receipts
+    Requester-->>MCP: manually_executed state
+    MCP-->>Agent: Sanitized state, without credentials or executable text
+    Agent->>Verify: Request independent read-only verification
+    Verify->>Provider: Read ordinary external state
+    Provider-->>Verify: Observed current state
+    Verify-->>User: Confirm or contradict the intended effect
+  end

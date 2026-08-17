@@ -1,0 +1,241 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/donovan-yohan/airlock/internal/config"
+	"github.com/donovan-yohan/airlock/internal/keys"
+	"github.com/donovan-yohan/airlock/internal/mcp"
+	"github.com/donovan-yohan/airlock/internal/netguard"
+	"github.com/donovan-yohan/airlock/internal/requester"
+	"github.com/donovan-yohan/airlock/internal/trusted"
+)
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "airlock:", err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	if len(args) == 0 {
+		return usageError()
+	}
+	switch args[0] {
+	case "requester":
+		if len(args) < 2 || args[1] != "serve" {
+			return usageError()
+		}
+		return serveRequester(args[2:])
+	case "trusted":
+		if len(args) < 2 || args[1] != "serve" {
+			return usageError()
+		}
+		return serveTrusted(args[2:])
+	case "request":
+		if len(args) < 2 || args[1] != "create" {
+			return usageError()
+		}
+		return createRequest(args[2:])
+	case "keygen":
+		return generateKeys(args[1:])
+	case "mcp":
+		return serveMCP(args[1:])
+	default:
+		return usageError()
+	}
+}
+
+func serveRequester(args []string) error {
+	flags := flag.NewFlagSet("requester serve", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "requester config path")
+	unsafeNonLoopback := flags.Bool("unsafe-non-loopback", false, "allow an explicitly configured non-loopback listener")
+	if err := flags.Parse(args); err != nil || *configPath == "" || flags.NArg() != 0 {
+		return errors.New("usage: airlock requester serve --config PATH [--unsafe-non-loopback]")
+	}
+	cfg, err := config.LoadRequester(*configPath)
+	if err != nil {
+		return err
+	}
+	requestTTL, catalogTTL, receiptTTL, _ := cfg.Durations()
+	publicKey, err := keys.LoadPublic(cfg.TrustedPublicKeyFile)
+	if err != nil {
+		return err
+	}
+	store, err := requester.NewStore(cfg.StateDir, publicKey, requestTTL, catalogTTL, receiptTTL)
+	if err != nil {
+		return err
+	}
+	listener, err := netguard.Listen(cfg.Listen, *unsafeNonLoopback)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	logger := log.New(os.Stderr, "airlock requester: ", log.LstdFlags|log.LUTC)
+	server := hardenedServer(requester.NewServer(store).Handler(), logger)
+	logger.Printf("listening on %s", listener.Addr())
+	return serveUntilSignal(server, listener, nil)
+}
+
+func serveTrusted(args []string) error {
+	flags := flag.NewFlagSet("trusted serve", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "trusted config path")
+	unsafeNonLoopback := flags.Bool("unsafe-non-loopback", false, "allow an explicitly configured non-loopback listener")
+	dev := flags.Bool("dev", false, "use the explicit development identity header")
+	if err := flags.Parse(args); err != nil || *configPath == "" || flags.NArg() != 0 {
+		return errors.New("usage: airlock trusted serve --config PATH [--dev] [--unsafe-non-loopback]")
+	}
+	cfg, err := config.LoadTrusted(*configPath)
+	if err != nil {
+		return err
+	}
+	pollInterval, requestTTL, catalogTTL, receiptTTL, _ := cfg.Durations()
+	privateKey, err := keys.LoadPrivate(cfg.PrivateKeyFile)
+	if err != nil {
+		return err
+	}
+	store, err := trusted.NewStore(cfg.StateDir, privateKey, cfg.Capabilities, requestTTL, receiptTTL)
+	if err != nil {
+		return err
+	}
+	handler, err := trusted.NewServer(store, cfg.AllowedLogins, *dev)
+	if err != nil {
+		return err
+	}
+	listener, err := netguard.Listen(cfg.Listen, *unsafeNonLoopback)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	logger := log.New(os.Stderr, "airlock trusted: ", log.LstdFlags|log.LUTC)
+	syncer := trusted.NewSyncer(store, privateKey, cfg.Capabilities, cfg.RequesterURL, pollInterval, catalogTTL)
+	server := hardenedServer(handler.Handler(), logger)
+	logger.Printf("listening on %s; manual-only mode", listener.Addr())
+	return serveUntilSignal(server, listener, func(ctx context.Context) { syncer.Run(ctx, logger) })
+}
+
+func createRequest(args []string) error {
+	flags := flag.NewFlagSet("request create", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "requester config path")
+	capability := flags.String("capability", "", "catalog capability id")
+	action := flags.String("action", "", "typed action id")
+	repository := flags.String("repository", "", "GitHub repository name")
+	permission := flags.String("permission", "", "GitHub collaborator permission")
+	reason := flags.String("reason", "", "human-readable request reason")
+	ttl := flags.Duration("ttl", 10*time.Minute, "request lifetime")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *configPath == "" || *capability == "" || *action == "" || *repository == "" || *permission == "" || *reason == "" {
+		return errors.New("usage: airlock request create --config PATH --capability ID --action ACTION --repository NAME --permission pull|push --reason TEXT [--ttl 10m]")
+	}
+	cfg, err := config.LoadRequester(*configPath)
+	if err != nil {
+		return err
+	}
+	host, port, err := net.SplitHostPort(cfg.Listen)
+	if err != nil {
+		return errors.New("requester listen address is invalid")
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() || port == "0" {
+		return errors.New("request create requires a concrete loopback requester listen address")
+	}
+	if *ttl < time.Minute {
+		return errors.New("request TTL is invalid")
+	}
+	input := requester.CreateInput{
+		CapabilityID: *capability, Action: *action,
+		Arguments: map[string]string{"repository": *repository, "permission": *permission},
+		Reason:    *reason, TTLSeconds: int64(*ttl / time.Second),
+	}
+	client, err := requester.NewClient("http://" + cfg.Listen)
+	if err != nil {
+		return err
+	}
+	record, err := client.Create(context.Background(), input)
+	if err != nil {
+		return err
+	}
+	output, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(output))
+	return nil
+}
+
+func serveMCP(args []string) error {
+	flags := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	requesterURL := flags.String("requester-url", "", "explicit local requester URL")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *requesterURL == "" {
+		return errors.New("usage: airlock mcp --requester-url http://127.0.0.1:PORT")
+	}
+	client, err := requester.NewClient(*requesterURL)
+	if err != nil {
+		return errors.New("mcp requester URL is invalid")
+	}
+	// Construction makes no network request: MCP initialization and tool
+	// registration remain available while the local requester is down.
+	return mcp.New(client).Serve(os.Stdin, os.Stdout)
+}
+
+func generateKeys(args []string) error {
+	flags := flag.NewFlagSet("keygen", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	privatePath := flags.String("private", "", "private key output path")
+	publicPath := flags.String("public", "", "public key output path")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *privatePath == "" || *publicPath == "" {
+		return errors.New("usage: airlock keygen --private PATH --public PATH")
+	}
+	if err := keys.GenerateFiles(*privatePath, *publicPath); err != nil {
+		return err
+	}
+	fmt.Printf("generated Ed25519 keypair: private=%s public=%s\n", *privatePath, *publicPath)
+	return nil
+}
+
+func hardenedServer(handler http.Handler, logger *log.Logger) *http.Server {
+	return &http.Server{
+		Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
+		WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10,
+		ErrorLog: logger,
+	}
+}
+
+func serveUntilSignal(server *http.Server, listener net.Listener, background func(context.Context)) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if background != nil {
+		go background(ctx)
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownContext)
+	}()
+	err := server.Serve(listener)
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func usageError() error {
+	return errors.New("usage: airlock {requester serve|trusted serve|request create|keygen|mcp}")
+}

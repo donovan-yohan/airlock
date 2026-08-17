@@ -8,6 +8,8 @@ A Go 1.25 module and one `airlock` binary with two services and a CLI:
 
 - `airlock requester serve --config ...`
 - `airlock trusted serve --config ...`
+- `airlock trusted requests list --config ... [--cursor CURSOR]`
+- `airlock trusted request {show,execute,deny} --config ... --id ...`
 - `airlock request create ...`
 - `airlock keygen ...`
 
@@ -32,8 +34,12 @@ Use the standard library unless a small dependency materially improves canonical
 - Validate requests against locally configured capabilities and versioned adapters, not requester catalog content.
 - Trusted-rendered UI checks Tailscale identity headers against an explicit login allowlist and fails closed when absent outside `--dev`.
 - Protect state-changing forms against CSRF and method confusion.
+- The trusted daemon alone owns state, signing, receipt delivery, and `gh`. Its
+  `0600` Unix socket in a `0700` trusted-state directory is a local-only control
+  plane for the same Unix account; CLI callers cannot select a reviewer or send
+  provider arguments, and never mutate state directly.
 - Render exact request digest, action, arguments, expiry, reason, and locally derived command.
-- Manual-only decisions: approve-for-manual-execution, deny, and mark-manually-executed. Do not invoke `gh`, a shell, browser, or external API.
+- Trusted execution: approve-and-execute persists a v2 approval/reservation before directly invoking configured absolute `gh` argv with a fixed environment; deny remains terminal. Do not invoke a shell, browser, arbitrary API, or requester-supplied command text.
 - Sign receipts with the trusted Ed25519 key; never expose private key material.
 
 ## Initial adapter
@@ -44,7 +50,7 @@ Use the standard library unless a small dependency materially improves canonical
 - the capability ID identifies its configured GitHub owner;
 - repository uses conservative GitHub name validation;
 - permission is selected from the capability's local allowed set (`pull`, `push` for the example);
-- locally derive a shell-safe `gh api --method PUT ...` command for display/copy only;
+- locally derive a direct-exec `gh api --method PUT ...` argv plan;
 - never accept a command or URL from requester.
 
 ## Config and sample deployment
@@ -52,7 +58,7 @@ Use the standard library unless a small dependency materially improves canonical
 - Separate example configs for requester and trusted node; no secrets.
 - Tailscale Serve guidance and example ACL intent without modifying live Tailscale state.
 - systemd user-unit templates for each role.
-- local smoke script that starts both roles on ephemeral loopback ports, publishes a signed catalog, creates a request, reviews it through an explicit dev identity, records a manual receipt, and verifies requester state.
+- local smoke script that starts both roles on ephemeral loopback ports, uses a fake absolute `gh` and isolated `GH_CONFIG_DIR`, executes one request through the trusted web UI and one through the trusted CLI, verifies v2 requester state and signed receipt pairs, and proves exactly two provider invocations.
 
 ## Tests
 

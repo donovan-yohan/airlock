@@ -48,8 +48,11 @@ def catalog():
 
 
 def receipt(decision="approved_for_manual_execution"):
+    version = "airlock.receipt/v1"
+    if decision in {"approved_for_execution", "executed"}:
+        version = "airlock.receipt/v2"
     return {
-        "version": "airlock.receipt/v1",
+        "version": version,
         "id": RECEIPT_ID,
         "request_id": REQUEST_ID,
         "request_digest": DIGEST,
@@ -79,6 +82,21 @@ def record(state="pending", receipts=None):
         "state": state,
         "receipts": receipts,
     }
+
+
+def test_client_accepts_v2_execution_receipts_and_rejects_mixed_versions():
+    value = record(
+        "executed",
+        [receipt("approved_for_execution"), receipt("executed")],
+    )
+    assert client_module._sanitize_record(value)["state"] == "executed"
+    mixed = receipt("executed")
+    mixed["version"] = "airlock.receipt/v1"
+    with pytest.raises(AirlockError, match="unsupported receipt"):
+        client_module._sanitize_receipt(mixed)
+    mixed["version"] = []
+    with pytest.raises(AirlockError, match="unsupported receipt"):
+        client_module._sanitize_receipt(mixed)
 
 
 @contextmanager

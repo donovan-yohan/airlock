@@ -28,7 +28,7 @@
       <div class="shell">
         <p class="eyebrow">System diagrams</p>
         <h1>Architecture with the authority boundary left visible.</h1>
-        <p class="lede">The package runs entirely on the untrusted requester side. Trusted policy, credentials, action reconstruction, human review, and manual execution stay across the wall.</p>
+        <p class="lede">The package runs entirely on the untrusted requester side. Trusted policy, credentials, action reconstruction, human review, and direct execution stay across the wall.</p>
       </div>
     </header>
 
@@ -83,7 +83,7 @@
             <li>No automatic escalation hook when another agent tool fails.</li>
             <li>No direct trusted-node connection from a model harness.</li>
             <li>No interpretation of catalog descriptions as trusted instructions.</li>
-            <li>No claim that <code>approved</code> or <code>manually_executed</code> proves an external effect.</li>
+            <li>No claim that <code>approved_for_execution</code> or <code>executed</code> proves an external effect.</li>
           </ul>
           <p>For the human decision and execution sequence, continue to the <a href="approval-timing.html">approval timing diagram</a>.</p>
         </section>

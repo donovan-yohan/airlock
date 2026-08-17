@@ -104,7 +104,7 @@ func TestMCPDiscoveryIsOfflineAndExact(t *testing.T) {
 	if len(Instructions()) >= 2048 {
 		t.Fatalf("instructions too long: %d", len(Instructions()))
 	}
-	for _, phrase := range []string{"untrusted data", "not approval or execution", "manually_executed", "external verification"} {
+	for _, phrase := range []string{"untrusted data", "create and observe", "never execute", "executed", "external verification"} {
 		if !strings.Contains(Instructions(), phrase) {
 			t.Fatalf("instructions missing %q", phrase)
 		}
@@ -168,7 +168,7 @@ func TestExpiredTerminalOutcomeAndReceiptHistoryRemainVisible(t *testing.T) {
 	record := testRecord(t, now, true)
 	record.State = "manually_executed"
 	record.Receipts = append(record.Receipts, model.Receipt{
-		Version:        model.ReceiptVersion,
+		Version:        model.ReceiptVersionV1,
 		ID:             "rec_0123456789abcdefghik",
 		RequestID:      record.Request.ID,
 		RequestDigest:  record.Request.Digest,
@@ -196,6 +196,21 @@ func TestExpiredTerminalOutcomeAndReceiptHistoryRemainVisible(t *testing.T) {
 				t.Fatalf("receipt projection exposed %q: %#v", forbidden, receipt)
 			}
 		}
+	}
+}
+
+func TestRequestViewRecognizesTrustedExecutionTerminalState(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	record := testRecord(t, now, false)
+	record.State = "executed"
+	request := record.Request
+	record.Receipts = []model.Receipt{
+		{Version: model.ReceiptVersion, ID: "rec_0123456789abcdefghij", RequestID: request.ID, RequestDigest: request.Digest, Decision: model.DecisionApproveForExecution, Reviewer: "reviewer@example.invalid", AdapterVersion: model.AdapterGitHubAddCollaboratorV1, CreatedAt: model.Timestamp(now), ExpiresAt: model.Timestamp(now.Add(time.Hour))},
+		{Version: model.ReceiptVersion, ID: "rec_0123456789abcdefghik", RequestID: request.ID, RequestDigest: request.Digest, Decision: model.DecisionExecuted, Reviewer: "reviewer@example.invalid", AdapterVersion: model.AdapterGitHubAddCollaboratorV1, CreatedAt: model.Timestamp(now.Add(time.Second)), ExpiresAt: model.Timestamp(now.Add(time.Hour))},
+	}
+	view := requestView(record, now)
+	if view["effective_state"] != "executed" || view["effect_status"] != "trusted_execution_attested_external_verification_required" {
+		t.Fatalf("trusted execution state was not surfaced: %#v", view)
 	}
 }
 
@@ -268,7 +283,7 @@ func testRecord(t *testing.T, now time.Time, expired bool) requester.Record {
 		return requester.Record{Request: request, State: "pending", Receipts: []model.Receipt{}}
 	}
 	receipt := model.Receipt{
-		Version: model.ReceiptVersion, ID: "rec_0123456789abcdefghij", RequestID: request.ID, RequestDigest: request.Digest,
+		Version: model.ReceiptVersionV1, ID: "rec_0123456789abcdefghij", RequestID: request.ID, RequestDigest: request.Digest,
 		Decision: model.DecisionApprove, Reviewer: "reviewer@example.invalid", AdapterVersion: model.AdapterGitHubAddCollaboratorV1,
 		CreatedAt: model.Timestamp(expires.Add(-5 * time.Minute)), ExpiresAt: model.Timestamp(expires),
 	}

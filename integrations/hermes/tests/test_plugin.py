@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from hermes_plugin_airlock import register, schemas
+from hermes_plugin_airlock import AirlockClient, AirlockError, register, schemas
 
 
 class Context:
@@ -65,7 +65,20 @@ def test_explicit_instruction_config_registers_bounded_system_prompt_section():
     assert "independently verify" in section["content"]
 
 
-def test_handler_returns_bounded_json_error_when_service_is_down():
+def test_create_schema_preserves_historical_v1_verification_path():
+    description = schemas.AIRLOCK_CREATE_REQUEST["description"]
+    assert "historical v1 manually_executed receipt" in description
+    assert "independent read-only verification" in description
+
+
+def test_handler_returns_bounded_json_error_when_service_is_down(monkeypatch):
+    def unavailable(_client):
+        raise AirlockError(
+            "service_unavailable",
+            "Local Airlock requester is unavailable or timed out",
+        )
+
+    monkeypatch.setattr(AirlockClient, "capabilities", unavailable)
     context = Context()
     register(context)
     raw = context.tools["airlock_capabilities"]["handler"]({})
@@ -89,7 +102,7 @@ def test_schema_explains_non_execution_semantics():
         )
     )
     assert "does not grant authority or execute" in text
-    assert "manually_executed" in text
+    assert "executed" in text
     assert "credentials" in text
 
 

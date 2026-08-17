@@ -31,8 +31,13 @@ _RFC3339_RE = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
     r"(?P<fraction>\.\d+)?(?P<zone>Z|[+-]\d{2}:\d{2})$"
 )
-_ALLOWED_STATES = {"pending", "approved", "denied", "manually_executed"}
-_ALLOWED_DECISIONS = {"approved_for_manual_execution", "denied", "manually_executed"}
+_ALLOWED_STATES = {
+    "pending", "approved", "approved_for_execution", "denied", "manually_executed", "executed"
+}
+_RECEIPT_DECISIONS = {
+    "airlock.receipt/v1": frozenset({"approved_for_manual_execution", "denied", "manually_executed"}),
+    "airlock.receipt/v2": frozenset({"approved_for_execution", "denied", "executed"}),
+}
 _ALLOWED_ACTION = "github.repo.add_collaborator"
 _ADAPTER_VERSION = "github.repo.add_collaborator/v1"
 
@@ -457,10 +462,12 @@ def _sanitize_receipt(value: Any) -> dict[str, Any]:
     receipt_id = _response_string(value.get("id"), "receipt id", 84)
     decision = _response_string(value.get("decision"), "receipt decision", 64)
     adapter_version = _response_string(value.get("adapter_version"), "adapter version", 128)
+    version = value.get("version")
+    allowed_decisions = _RECEIPT_DECISIONS.get(version) if isinstance(version, str) else None
     if (
-        value.get("version") != "airlock.receipt/v1"
+        allowed_decisions is None
         or not _RECEIPT_ID_RE.fullmatch(receipt_id)
-        or decision not in _ALLOWED_DECISIONS
+        or decision not in allowed_decisions
         or adapter_version != _ADAPTER_VERSION
     ):
         raise AirlockError("invalid_response", "Requester returned an unsupported receipt")

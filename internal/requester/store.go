@@ -263,7 +263,7 @@ func (s *Store) ActionableRequests() []model.Request {
 	now := s.now().UTC()
 	requests := make([]model.Request, 0, len(s.state.Requests))
 	for _, record := range s.state.Requests {
-		if record.State != "pending" && record.State != "approved" {
+		if record.State != "pending" && record.State != "approved" && record.State != "approved_for_execution" {
 			continue
 		}
 		expires, err := time.Parse(time.RFC3339, record.Request.ExpiresAt)

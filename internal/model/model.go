@@ -16,14 +16,25 @@ import (
 const (
 	CatalogVersion = "airlock.catalog/v1"
 	RequestVersion = "airlock.request/v1"
-	ReceiptVersion = "airlock.receipt/v1"
+	// ReceiptVersion is emitted by the trusted executor. ReceiptVersionV1 is
+	// retained only so requester and trusted recovery can read already-durable
+	// manual-workflow receipts.
+	ReceiptVersionV1 = "airlock.receipt/v1"
+	ReceiptVersion   = "airlock.receipt/v2"
 
 	ActionGitHubAddCollaborator    = "github.repo.add_collaborator"
 	AdapterGitHubAddCollaboratorV1 = "github.repo.add_collaborator/v1"
 
-	DecisionApprove = "approved_for_manual_execution"
-	DecisionDeny    = "denied"
-	DecisionExecute = "manually_executed"
+	DecisionApproveForManualExecution = "approved_for_manual_execution"
+	DecisionManuallyExecuted          = "manually_executed"
+	DecisionApproveForExecution       = "approved_for_execution"
+	DecisionExecuted                  = "executed"
+	DecisionDeny                      = "denied"
+
+	// Kept as source compatibility names for callers that construct historical
+	// v1 receipts. New trusted code must use the explicit v2 names above.
+	DecisionApprove = DecisionApproveForManualExecution
+	DecisionExecute = DecisionManuallyExecuted
 )
 
 type GitHubConstraints struct {

@@ -19,7 +19,9 @@ AIRLOCK_CREATE_REQUEST = {
         "instead of searching for, requesting, or bypassing credentials unavailable to "
         "the current harness. This queues a request only: it does not grant authority or "
         "execute the action. Call airlock_capabilities first, report the returned request "
-        "ID/state, and never claim success until airlock_requests shows a manually_executed receipt."
+        "ID/state, and never claim an external effect until airlock_requests shows an "
+        "executed receipt (or a historical v1 manually_executed receipt) and independent "
+        "read-only verification confirms provider state."
     ),
     "parameters": {
         "type": "object",
@@ -64,9 +66,9 @@ AIRLOCK_REQUESTS = {
     "description": (
         "Read Airlock request state and trusted receipts. Pass request_id for one request, "
         "or omit it to list recent requests. Records include expires_at and derived expired; "
-        "expired records are not current authority. approved means only approved for manual "
-        "execution; it is not proof of execution. Only manually_executed means the trusted "
-        "reviewer recorded that the displayed action was manually performed."
+        "expired records are not current authority. approved_for_execution means the trusted "
+        "reviewer authorized a locally reconstructed attempt; it is not external proof. executed "
+        "only attests that the trusted child process returned success and still requires independent verification."
     ),
     "parameters": {
         "type": "object",
@@ -77,7 +79,7 @@ AIRLOCK_REQUESTS = {
             },
             "state": {
                 "type": "string",
-                "enum": ["pending", "approved", "denied", "manually_executed"],
+                "enum": ["pending", "approved", "approved_for_execution", "denied", "manually_executed", "executed"],
                 "description": "Optional state filter when listing recent requests",
             },
             "limit": {

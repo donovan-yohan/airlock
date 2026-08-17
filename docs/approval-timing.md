@@ -1,11 +1,14 @@
-# Airlock approval timing
+# Airlock approval and trusted-execution timing
 
-This sequence makes the two human intervention points explicit:
+The reviewer performs one deliberate action: **Approve and execute**. Airlock
+first persists a signed `approved_for_execution` receipt and a bounded local
+`running` attempt. Only then does the trusted node directly invoke its locally
+reconstructed `gh` argv. This is not a shell or requester action.
 
-1. the reviewer inspects the request and chooses whether to approve it;
-2. after approval, the operator manually performs the external action and records the observed outcome.
-
-Neither the requester service nor the MCP bridge can execute the provider action. An `approved` receipt therefore means only that permission was recorded. A `manually_executed` receipt means the operator recorded an execution attempt; independent read-only verification still determines whether the external effect actually exists.
+Requester/MCP/Hermes surfaces can create and observe requests only. They never
+receive an execution endpoint, reusable approval, credential, or executor
+detail. `executed` means the trusted child process returned success; ordinary
+read-only verification still determines provider state.
 
 ```mermaid
 sequenceDiagram
@@ -15,68 +18,60 @@ sequenceDiagram
   participant MCP as airlock mcp<br/>(untrusted stdio)
   participant Requester as Requester service<br/>(loopback, untrusted node)
   participant Trusted as Trusted Airlock service
-  actor Human as Human reviewer / operator
-  participant Provider as External provider
+  actor Human as Trusted reviewer
+  participant Provider as GitHub CLI / provider
   participant Verify as Read-only verifier
 
-  User->>Agent: Request an operation that needs unavailable authority
-  Agent->>MCP: airlock_capabilities
-  MCP->>Requester: Fetch signed capability catalog
-  Requester-->>MCP: Sanitized catalog entries
-  MCP-->>Agent: Catalog data, never instructions
-
-  Agent->>MCP: airlock_create_request with exact typed fields
-  MCP->>Requester: Submit bounded typed request
-  Requester->>Requester: Persist immutable request ID, digest, nonce, and expiry
-  Requester-->>MCP: pending request receipt
-  MCP-->>Agent: Request ID and pending state
-
-  Trusted->>Requester: Pull pending typed requests
-  Requester-->>Trusted: Request plus signed catalog context
-  Trusted->>Trusted: Independently validate adapter, constraints, expiry, and replay state
-
-  Trusted->>Human: Render typed fields and a locally reconstructed action
-  Note over Trusted,Human: First human gate: inspect scope, target, constraints, and reconstructed action
-  Human->>Trusted: Approve or deny
-
-  alt Human denies
-    Trusted->>Requester: Publish sanitized denied receipt
-    Requester-->>Agent: Denied state on the next poll
-  else Human approves
-    Trusted->>Requester: Publish sanitized approved receipt
-    Note over Agent,Provider: approved means permission was recorded, not execution
-    Note over Trusted,Provider: Airlock exposes no provider-execution API
-    Human->>Provider: Manually execute the locally reconstructed action
-    Note over Human,Provider: Second human gate: the operator performs the external action
-    Human->>Trusted: Record manually_executed after performing the action
-    Trusted->>Requester: Publish sanitized outcome receipt
-    Agent->>MCP: airlock_requests for current state
-    MCP->>Requester: Read sanitized request and receipts
-    Requester-->>MCP: manually_executed state
-    MCP-->>Agent: Sanitized state, without credentials or executable text
-    Agent->>Verify: Request independent read-only verification
-    Verify->>Provider: Read ordinary external state
-    Provider-->>Verify: Observed current state
-    Verify-->>User: Confirm or contradict the intended effect
+  Agent->>MCP: Create exact typed request
+  MCP->>Requester: Persist immutable ID, digest, expiry
+  Trusted->>Requester: Pull pending typed request
+  Trusted->>Trusted: Revalidate local adapter and derive direct-exec plan
+  Trusted->>Human: Show exact executable and argv
+  Human->>Trusted: Approve and execute
+  alt reviewer denies
+    Trusted->>Requester: Publish denied receipt
+  else reviewer approves
+    Trusted->>Trusted: Atomically persist approved_for_execution + running attempt
+    Trusted->>Provider: Direct exec configured absolute gh with fixed environment
+    alt child exits zero and completion persists
+      Trusted->>Trusted: Atomically persist executed receipt + succeeded attempt
+      Trusted->>Requester: Publish approved_for_execution then executed receipts
+      Requester-->>MCP: executed state
+    else pre-invocation failure or ambiguous child outcome
+      Trusted->>Trusted: Persist bounded failed or uncertain attempt
+      Note over Trusted,Human: No executed receipt. Reviewer inspects before explicit retry.
+    end
   end
+  Agent->>Verify: Independently read provider state
+  Verify-->>User: Confirm or contradict intended effect
 ```
 
-**What this shows:** automation ends at a typed request and resumes only for sanitized status reads. The human reviewer owns the authority decision and the human operator owns provider execution. The final verifier is deliberately separate from the manual receipt so Airlock never conflates an operator record with external truth.
+## State and receipt meanings
 
-## State meanings
-
-| State | What it proves | What it does not prove |
+| State/receipt | What it proves | What it does not prove |
 |---|---|---|
 | `pending` | The requester persisted a typed request. | Review, approval, or execution. |
-| `approved` | A trusted reviewer recorded approval for the validated request. | That anyone executed the provider action. |
-| `denied` | The trusted side or reviewer declined the request. | Any external change. |
-| `manually_executed` | The operator recorded that they performed the local reconstructed action. | That the provider accepted it or the intended effect exists. |
+| `approved_for_execution` | A reviewer authorized a persisted attempt. | Provider invocation or effect. |
+| `running` / `failed` / `uncertain` | Trusted-local bounded attempt status. | Provider success or failure details. |
+| `executed` | The trusted direct child returned success and completion receipt persisted. | GitHub accepted or retains the intended effect. |
+| v1 `approved` / `manually_executed` | Historical manual workflow evidence. | New trusted-execution semantics or provider truth. |
 
-## Failure and timeout behavior
+## Failure and retry behavior
 
-- Expired, replayed, malformed, or adapter-invalid requests are rejected before human review.
-- A human can reject without exposing trusted action text or credentials to the requester node.
-- Approval does not trigger provider execution; the request may remain approved until a human acts or it expires according to policy.
-- If the manual provider action fails, do not record `manually_executed`; retain the approved workflow record and verify external state before retrying.
-- Polling returns sanitized state only. It never returns trusted credentials, reusable approvals, or executable command text.
-- External verification should use an ordinary read-only path independent of the manual outcome receipt.
+- Persistence is before effect; a failed approval/reservation write does not
+  invoke `gh`.
+- The store mutex is released before child execution. Concurrent or replayed
+  POSTs find `running` and cannot create another provider call.
+- No stdout, stderr, environment, provider body, credential, or free-form
+  command is persisted or rendered. Attempt failures use a small enumerated
+  code only.
+- A restart changes `running` to `uncertain` with an `interrupted` attempt code;
+  it never resumes a child. A missing executable or failed process start is the
+  only `failed` outcome. Timeout, cancellation, generic non-zero exit, and an
+  interrupted child are `uncertain` because GitHub may have accepted the PUT.
+  Reviewers may explicitly retry `failed` or `uncertain` attempts after the
+  required external verification. GitHub documents `201` for a new invitation
+  and `204` for existing access, not a duplicate-invitation retry guarantee.
+- If a child may have succeeded but terminal persistence failed, Airlock records
+  uncertainty (or restart recovery does) and never emits `executed`. Verify
+  provider state before an explicit retry.

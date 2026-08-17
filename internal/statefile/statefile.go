@@ -48,7 +48,7 @@ func Load(path string, destination any) error {
 
 func Save(path string, value any) error {
 	dir := filepath.Dir(path)
-	if err := ensurePrivateDir(dir); err != nil {
+	if err := EnsurePrivateDir(dir); err != nil {
 		return err
 	}
 	directory, err := os.Open(dir)
@@ -95,7 +95,10 @@ func Save(path string, value any) error {
 	return directory.Sync()
 }
 
-func ensurePrivateDir(path string) error {
+// EnsurePrivateDir creates or verifies a real owner-private directory. Trusted
+// daemon sockets use the same guard as atomic state files; on Linux, their
+// listener separately verifies each peer credential before serving HTTP.
+func EnsurePrivateDir(path string) error {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return err
 	}

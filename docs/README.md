@@ -3,7 +3,7 @@
 This directory is a dependency-free static site suitable for GitHub Pages. It contains three intentionally separate deliverables:
 
 - [`architecture.md`](architecture.md) and its raw Mermaid sources describe system boundaries, installation topology, and managed-instruction ownership;
-- [`approval-timing.md`](approval-timing.md) and its raw Mermaid source describe approval, manual execution, receipts, and external verification over time;
+- [`approval-timing.md`](approval-timing.md) and its raw Mermaid source describe approval, trusted direct execution, receipts, retries, and external verification over time;
 - [`index.html`](index.html) is the marketing landing page, with additional HTML documentation pages sharing [`assets/styles.css`](assets/styles.css).
 
 ## Render diagrams

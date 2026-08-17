@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/donovan-yohan/airlock/internal/model"
 )
@@ -57,6 +58,7 @@ func TestDeploymentExamplesMatchDocumentedSystemdPaths(t *testing.T) {
 		{"requester.state_dir", requester.StateDir, filepath.Join(home, ".local", "state", "airlock", "requester")},
 		{"requester.trusted_public_key_file", requester.TrustedPublicKeyFile, filepath.Join(configDir, "trusted.pub")},
 		{"trusted.state_dir", trusted.StateDir, filepath.Join(home, ".local", "state", "airlock", "trusted")},
+		{"trusted.control_socket", trusted.ControlSocket, filepath.Join(home, ".local", "state", "airlock", "trusted", "control.sock")},
 		{"trusted.private_key_file", trusted.PrivateKeyFile, filepath.Join(configDir, "trusted.key")},
 	} {
 		if check.got != check.want {
@@ -146,6 +148,44 @@ func TestTrustedConfigRejectsInvalidAuthorityIdentities(t *testing.T) {
 		}
 		if _, err := LoadTrusted(path); err == nil {
 			t.Fatalf("invalid authority identity %d accepted", index)
+		}
+	}
+}
+
+func TestTrustedExecutionConfigIsStrictAndResolvesIsolatedDirectory(t *testing.T) {
+	example, err := os.ReadFile(filepath.Join("..", "..", "configs", "trusted.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "trusted.json")
+	if err := os.WriteFile(path, example, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trusted, err := LoadTrusted(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(trusted.GitHubCLIPath) || !filepath.IsAbs(trusted.GitHubConfigDir) || !filepath.IsAbs(trusted.ControlSocket) || trusted.GitHubConfigDir == string(filepath.Separator) {
+		t.Fatalf("trusted execution paths were not strict: %#v", trusted)
+	}
+	if timeout, err := trusted.ExecutionDuration(); err != nil || timeout != 30*time.Second {
+		t.Fatalf("execution timeout=%s err=%v", timeout, err)
+	}
+	for _, replacement := range []struct{ old, new string }{
+		{`"github_cli_path": "/usr/bin/gh"`, `"github_cli_path": "gh"`},
+		{`"execution_timeout": "30s"`, `"execution_timeout": "0s"`},
+		{`"github_config_dir": "../../.local/state/airlock/gh-config"`, `"github_config_dir": "/"`},
+		{`"control_socket": "../../.local/state/airlock/trusted/control.sock"`, `"control_socket": "/tmp/airlock-control.sock"`},
+		{`"control_socket": "../../.local/state/airlock/trusted/control.sock"`, `"control_socket": "../../.local/state/airlock/trusted/nested/control.sock"`},
+		{`"github_cli_path": "/usr/bin/gh"`, `"github_cli_path": "/` + strings.Repeat("x", maxTrustedPathBytes) + `"`},
+		{`"github_cli_path": "/usr/bin/gh"`, `"github_cli_path": "/usr/bin/\u0001gh"`},
+	} {
+		contents := bytes.Replace(example, []byte(replacement.old), []byte(replacement.new), 1)
+		if err := os.WriteFile(path, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadTrusted(path); err == nil {
+			t.Fatalf("unsafe trusted execution config accepted: %s", replacement.new)
 		}
 	}
 }

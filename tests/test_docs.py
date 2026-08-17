@@ -106,6 +106,20 @@ class DocsTests(unittest.TestCase):
             )
             self.assertIn("<svg", payload, name)
             self.assertGreater(len(payload), 500, name)
+            if name == "approval-timing":
+                self.assertIn(
+                    "Direct exec configured absolute gh with fixed environment",
+                    payload,
+                )
+                self.assertIn(
+                    "Atomically persist executed receipt + succeeded attempt",
+                    payload,
+                )
+                self.assertNotIn(
+                    "Manually execute the locally reconstructed action",
+                    payload,
+                )
+                self.assertNotIn("Airlock exposes no provider-execution API", payload)
 
     def test_static_site_local_references_resolve(self) -> None:
         for page_name in HTML_PAGES:
@@ -148,7 +162,7 @@ class DocsTests(unittest.TestCase):
             self.assertIn('name="viewport"', page, page_name)
 
     def test_timing_docs_use_protocol_states(self) -> None:
-        expected = ("pending", "approved", "denied", "manually_executed")
+        expected = ("pending", "approved_for_execution", "denied", "executed")
         for relative in ("approval-timing.md", "approval-timing.html", "diagrams/approval-timing.mmd"):
             content = (DOCS / relative).read_text(encoding="utf-8")
             for state in expected:
@@ -156,13 +170,13 @@ class DocsTests(unittest.TestCase):
             self.assertNotIn("execution_failed", content, relative)
             self.assertNotIn("rejected receipt", content, relative)
 
-    def test_marketing_page_states_manual_authority_path(self) -> None:
+    def test_marketing_page_states_trusted_execution_path(self) -> None:
         page = (DOCS / "index.html").read_text(encoding="utf-8")
         for claim in (
             "Agent requests",
             "Trusted node validates",
             "Human reviews",
-            "Human executes",
+            "Trusted node executes",
             "Verifier observes",
             "Credentials never cross the boundary",
         ):

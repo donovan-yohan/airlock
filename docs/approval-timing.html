@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Timing diagram for Airlock approval requests, human review, manual execution, receipts, and independent verification.">
+  <meta name="description" content="Timing diagram for Airlock trusted execution, signed receipts, retries, and independent verification.">
   <title>Approval timing · Airlock</title>
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/styles.css">
@@ -27,8 +27,8 @@
     <header class="docs-hero">
       <div class="shell">
         <p class="eyebrow">Human-in-the-loop sequence</p>
-        <h1>Approval is a decision. Execution is a second human act.</h1>
-        <p class="lede">Airlock deliberately separates request persistence, trusted validation, human approval, manual provider execution, and independent verification.</p>
+        <h1>Approval is persisted before trusted execution.</h1>
+        <p class="lede">Airlock separates request persistence, trusted validation, human approval, direct local execution, bounded failure state, and independent verification.</p>
       </div>
     </header>
 
@@ -45,12 +45,12 @@
         <section id="sequence">
           <p class="kicker">End-to-end timing</p>
           <h2>Where the human enters the loop</h2>
-          <p>The first human gate is the authority decision: inspect the validated typed fields and locally reconstructed action, then approve or reject. The second gate is provider execution: after approval, the operator performs the action manually and records the outcome.</p>
+          <p>The reviewer inspects validated typed fields and the locally reconstructed executable/argv, then chooses Approve and execute or deny. Airlock persists approval plus a running attempt before direct local execution.</p>
           <a class="diagram-link" href="assets/diagrams/approval-timing.svg">Open full-size SVG ↗</a>
           <figure class="diagram timing">
-            <img src="assets/diagrams/approval-timing.svg" alt="Sequence diagram showing capability discovery, typed request creation, trusted validation, human approval, manual provider execution, sanitized receipts, and independent verification.">
+            <img src="assets/diagrams/approval-timing.svg" alt="Sequence diagram showing typed request creation, trusted validation, approval reservation, direct execution, bounded failure state, receipts, and independent verification.">
           </figure>
-          <div class="notice"><strong>No automatic handoff:</strong> an <code>approved</code> receipt does not invoke the provider. Airlock exposes no provider-execution API.</div>
+          <div class="notice"><strong>Persist before effect:</strong> an <code>approved_for_execution</code> receipt and running attempt are durable before Airlock invokes the configured absolute CLI.</div>
         </section>
 
         <section id="states">
@@ -60,9 +60,9 @@
             <thead><tr><th>State</th><th>What it proves</th><th>What it does not prove</th></tr></thead>
             <tbody>
               <tr><td><code>pending</code></td><td>The requester persisted a typed request.</td><td>Review, approval, or execution.</td></tr>
-              <tr><td><code>approved</code></td><td>A trusted reviewer recorded approval for the validated request.</td><td>That anyone executed the provider action.</td></tr>
+              <tr><td><code>approved_for_execution</code></td><td>A trusted reviewer authorized a persisted execution attempt.</td><td>That the provider action ran or succeeded.</td></tr>
               <tr><td><code>denied</code></td><td>The trusted side or reviewer declined the request.</td><td>Any external change.</td></tr>
-              <tr><td><code>manually_executed</code></td><td>The operator recorded a manual execution attempt.</td><td>That the provider accepted it or the intended effect exists.</td></tr>
+              <tr><td><code>executed</code></td><td>The trusted child returned success and terminal state persisted.</td><td>That the provider accepted it or the intended effect exists.</td></tr>
             </tbody>
           </table>
         </section>
@@ -73,8 +73,8 @@
           <ul>
             <li>Expired, replayed, malformed, or adapter-invalid requests are rejected before human review.</li>
             <li>A reviewer can reject without exposing credentials or trusted action text to the requester.</li>
-            <li>An approved request can remain unexecuted; status polling cannot convert it into execution.</li>
-            <li>If the manual provider action fails, do not record <code>manually_executed</code>; verify external state before retrying.</li>
+            <li>Concurrent/replayed POSTs cannot create a second running provider invocation.</li>
+            <li>If execution fails or becomes uncertain, no <code>executed</code> receipt is emitted; the reviewer may explicitly retry and verify.</li>
             <li>Receipts are sanitized and never include a reusable approval or executable command.</li>
             <li>External verification remains independent of the human-entered outcome receipt.</li>
           </ul>

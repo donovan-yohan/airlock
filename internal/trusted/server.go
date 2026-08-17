@@ -20,7 +20,7 @@ const (
 )
 
 type Server struct {
-	store   *Store
+	service *ActionService
 	dev     bool
 	allowed map[string]bool
 	csrf    string
@@ -28,12 +28,19 @@ type Server struct {
 }
 
 func NewServer(store *Store, allowedLogins []string, dev bool) (*Server, error) {
+	return NewServerWithActionService(NewActionService(store), allowedLogins, dev)
+}
+
+func NewServerWithActionService(service *ActionService, allowedLogins []string, dev bool) (*Server, error) {
+	if service == nil {
+		return nil, errors.New("trusted action service is required")
+	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return nil, err
 	}
 	server := &Server{
-		store: store, dev: dev, allowed: make(map[string]bool, len(allowedLogins)),
+		service: service, dev: dev, allowed: make(map[string]bool, len(allowedLogins)),
 		csrf: base64.RawURLEncoding.EncodeToString(raw), mux: http.NewServeMux(),
 	}
 	for _, login := range allowedLogins {
@@ -86,7 +93,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid review page query", http.StatusBadRequest)
 		return
 	}
-	records, nextCursor, err := s.store.RecordPage(paging.MaxPage, cursor)
+	records, nextCursor, err := s.service.RecordPage(cursor)
 	if err != nil {
 		http.Error(w, "invalid review page cursor", http.StatusBadRequest)
 		return
@@ -118,19 +125,27 @@ func (s *Server) requestRoute(w http.ResponseWriter, r *http.Request) {
 		s.review(w, r, reviewer, parts[0])
 		return
 	}
-	if len(parts) == 2 && parts[0] != "" && parts[1] == "decision" {
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "execute" {
 		if r.Method != http.MethodPost {
 			trustedMethodNotAllowed(w, http.MethodPost)
 			return
 		}
-		s.decision(w, r, reviewer, parts[0])
+		s.execute(w, r, reviewer, parts[0])
+		return
+	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "deny" {
+		if r.Method != http.MethodPost {
+			trustedMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		s.deny(w, r, reviewer, parts[0])
 		return
 	}
 	http.NotFound(w, r)
 }
 
 func (s *Server) review(w http.ResponseWriter, _ *http.Request, reviewer, id string) {
-	record, command, found := s.store.Record(id)
+	record, command, found := s.service.Record(id)
 	if !found {
 		http.Error(w, "request not found", http.StatusNotFound)
 		return
@@ -146,38 +161,57 @@ func (s *Server) review(w http.ResponseWriter, _ *http.Request, reviewer, id str
 	}{reviewer, record, command, s.csrf})
 }
 
-func (s *Server) decision(w http.ResponseWriter, r *http.Request, reviewer, id string) {
+func (s *Server) validateTrustedForm(w http.ResponseWriter, r *http.Request) bool {
 	if r.URL.RawQuery != "" {
 		http.Error(w, "query parameters are not allowed", http.StatusBadRequest)
-		return
+		return false
 	}
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/x-www-form-urlencoded" {
 		http.Error(w, "form content type required", http.StatusUnsupportedMediaType)
-		return
+		return false
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
-		return
+		return false
 	}
 	for key, values := range r.PostForm {
-		if (key != "csrf_token" && key != "decision") || len(values) != 1 {
+		if key != "csrf_token" || len(values) != 1 {
 			http.Error(w, "invalid form fields", http.StatusBadRequest)
-			return
+			return false
 		}
 	}
-	if len(r.PostForm) < 2 || !s.validCSRF(r, r.PostForm.Get("csrf_token")) {
+	if len(r.PostForm) != 1 || !s.validCSRF(r, r.PostForm.Get("csrf_token")) {
 		http.Error(w, "CSRF validation failed", http.StatusForbidden)
-		return
+		return false
 	}
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
 		http.Error(w, "cross-site form refused", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+func (s *Server) execute(w http.ResponseWriter, r *http.Request, reviewer, id string) {
+	if !s.validateTrustedForm(w, r) {
 		return
 	}
-	decision := r.PostForm.Get("decision")
-	if _, err := s.store.Decide(id, decision, reviewer); err != nil {
-		http.Error(w, "decision rejected: "+err.Error(), http.StatusUnprocessableEntity)
+	if err := s.service.Execute(r.Context(), id, reviewer); err != nil {
+		// Errors can originate in a local child process. Keep those details out
+		// of the UI; the bounded stored status is the reviewer-facing evidence.
+		http.Error(w, "trusted execution was not completed; inspect the bounded attempt status before an explicit retry", http.StatusUnprocessableEntity)
+		return
+	}
+	http.Redirect(w, r, "/requests/"+id, http.StatusSeeOther)
+}
+
+func (s *Server) deny(w http.ResponseWriter, r *http.Request, reviewer, id string) {
+	if !s.validateTrustedForm(w, r) {
+		return
+	}
+	if err := s.service.Deny(id, reviewer); err != nil {
+		http.Error(w, "decision rejected", http.StatusUnprocessableEntity)
 		return
 	}
 	http.Redirect(w, r, "/requests/"+id, http.StatusSeeOther)
@@ -242,12 +276,12 @@ func trustedMethodNotAllowed(w http.ResponseWriter, methods ...string) {
 var trustedHomePage = template.Must(template.New("home").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Airlock trusted review</title><style>
 body{font:16px system-ui,sans-serif;max-width:72rem;margin:2rem auto;padding:0 1rem;color:#18212f;background:#f7f8fa}article{background:white;border:1px solid #ccd5df;border-radius:.6rem;padding:1rem;margin:1rem 0}code{overflow-wrap:anywhere}.state{font-weight:700}.muted{color:#536273}a{color:#064f9e}
-</style></head><body><h1>Airlock trusted review</h1><p>Signed in as <strong>{{.Reviewer}}</strong>.</p><p class="muted">This service renders commands for manual use and never executes them. Pages contain at most {{.PageSize}} requests.</p>{{if .Records}}{{range .Records}}<article><p class="state">{{.State}}</p><p><code>{{.Request.ID}}</code></p><p>{{.Request.Action}} on {{index .Request.Arguments "repository"}}</p><a href="/requests/{{.Request.ID}}">Review exact request</a></article>{{end}}{{else}}<p>No requests have been pulled.</p>{{end}}{{if .NextCursor}}<p><a href="/?cursor={{.NextCursor}}">Older requests →</a></p>{{end}}</body></html>`))
+</style></head><body><h1>Airlock trusted review</h1><p>Signed in as <strong>{{.Reviewer}}</strong>.</p><p class="muted">Airlock validates a typed request, persists a reviewer-approved execution attempt, then directly executes its locally reconstructed argv. Pages contain at most {{.PageSize}} requests.</p>{{if .Records}}{{range .Records}}<article><p class="state">{{.State}}</p><p><code>{{.Request.ID}}</code></p><p>{{.Request.Action}} on {{index .Request.Arguments "repository"}}</p><a href="/requests/{{.Request.ID}}">Review exact request</a></article>{{end}}{{else}}<p>No requests have been pulled.</p>{{end}}{{if .NextCursor}}<p><a href="/?cursor={{.NextCursor}}">Older requests →</a></p>{{end}}</body></html>`))
 
 var trustedReviewPage = template.Must(template.New("review").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Airlock request review</title><style>
 body{font:16px system-ui,sans-serif;max-width:72rem;margin:2rem auto;padding:0 1rem;color:#18212f;background:#f7f8fa}section{background:white;border:1px solid #ccd5df;border-radius:.6rem;padding:1rem;margin:1rem 0}code,pre{overflow-wrap:anywhere;white-space:pre-wrap}dt{font-weight:700;margin-top:.8rem}button{padding:.6rem .9rem;margin:.4rem .4rem .4rem 0}textarea{display:block;width:100%;max-width:50rem}.warning{background:#fff4d6;border-color:#d59b22}
 </style></head><body><p><a href="/">← All requests</a></p><h1>Trusted request review</h1><section><dl><dt>State</dt><dd>{{.Record.State}}</dd><dt>Request ID</dt><dd><code>{{.Record.Request.ID}}</code></dd><dt>Exact digest</dt><dd><code>{{.Record.Request.Digest}}</code></dd><dt>Action</dt><dd><code>{{.Record.Request.Action}}</code></dd><dt>Arguments</dt><dd>repository=<code>{{index .Record.Request.Arguments "repository"}}</code><br>permission=<code>{{index .Record.Request.Arguments "permission"}}</code></dd><dt>Reason</dt><dd>{{.Record.Request.Reason}}</dd><dt>Created</dt><dd>{{.Record.Request.CreatedAt}}</dd><dt>Expires</dt><dd>{{.Record.Request.ExpiresAt}}</dd></dl></section>
-<section class="warning"><h2>Locally derived command</h2><p>Display/copy only. Airlock will not run this command.</p>{{if .Command}}<pre>{{.Command}}</pre>{{else}}<p>Request is not renderable by the installed adapter.</p>{{end}}</section>
-{{if eq .Record.State "pending"}}<form method="post" action="/requests/{{.Record.Request.ID}}/decision"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button name="decision" value="approved_for_manual_execution">Approve for manual execution</button><button name="decision" value="denied">Deny</button></form>{{else if eq .Record.State "approved"}}<form method="post" action="/requests/{{.Record.Request.ID}}/decision"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button name="decision" value="manually_executed">Mark manually executed</button></form>{{end}}
-{{if .Record.Receipts}}<section><h2>Signed receipts</h2>{{range .Record.Receipts}}<p><strong>{{.Receipt.Decision}}</strong> by {{.Receipt.Reviewer}} at {{.Receipt.CreatedAt}} — delivered: {{.Delivered}}</p>{{end}}</section>{{end}}</body></html>`))
+<section class="warning"><h2>Locally reconstructed action</h2><p>For an execution attempt, Airlock passes this configured executable and exact argv directly to the local process. It is not a shell or requester action.</p>{{if .Command}}<pre>{{.Command}}</pre>{{else}}<p>Request is not renderable by the installed adapter.</p>{{end}}</section>
+{{if eq .Record.State "pending"}}<form method="post" action="/requests/{{.Record.Request.ID}}/execute"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button>Approve and execute</button></form><form method="post" action="/requests/{{.Record.Request.ID}}/deny"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button>Deny</button></form>{{else if or (eq .Record.State "failed") (eq .Record.State "uncertain")}}<form method="post" action="/requests/{{.Record.Request.ID}}/execute"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button>Retry execution</button></form>{{else if eq .Record.State "running"}}<p class="warning">An execution attempt is running. Refresh for its bounded result; no concurrent attempt can start.</p>{{else if eq .Record.State "executed"}}<p class="warning"><strong>Local execution succeeded; this does not prove GitHub state.</strong> Verify the intended effect through an independent read-only provider check.</p>{{end}}
+{{if .Record.Attempts}}<section><h2>Bounded local execution attempts</h2>{{range .Record.Attempts}}<p><strong>{{.Status}}</strong> — {{.ID}} — started {{.StartedAt}}{{if .FinishedAt}}, finished {{.FinishedAt}}{{end}}{{if .FailureCode}}, code {{.FailureCode}}{{end}}</p>{{end}}</section>{{end}}{{if .Record.Receipts}}<section><h2>Signed receipts</h2>{{range .Record.Receipts}}<p><strong>{{.Receipt.Decision}}</strong> by {{.Receipt.Reviewer}} at {{.Receipt.CreatedAt}} — delivered: {{.Delivered}}</p>{{end}}</section>{{end}}</body></html>`))

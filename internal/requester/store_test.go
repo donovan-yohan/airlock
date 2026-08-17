@@ -205,7 +205,7 @@ func TestMaximumRequesterRecordCountFitsAtomicStateFile(t *testing.T) {
 		receipts := make([]model.Receipt, 2)
 		for receiptIndex := range receipts {
 			receipts[receiptIndex] = model.Receipt{
-				Version: model.ReceiptVersion, ID: fmt.Sprintf("rec_%080d", index*2+receiptIndex),
+				Version: model.ReceiptVersionV1, ID: fmt.Sprintf("rec_%080d", index*2+receiptIndex),
 				RequestID: requestID, RequestDigest: request.Digest,
 				Decision: []string{model.DecisionApprove, model.DecisionExecute}[receiptIndex],
 				Reviewer: strings.Repeat("r", 254), AdapterVersion: model.AdapterGitHubAddCollaboratorV1,
@@ -393,8 +393,12 @@ func testCreateInput() CreateInput {
 
 func testReceipt(t *testing.T, privateKey ed25519.PrivateKey, now time.Time, request model.Request, decision, id string) model.Receipt {
 	t.Helper()
+	version := model.ReceiptVersion
+	if decision == model.DecisionApproveForManualExecution || decision == model.DecisionManuallyExecuted {
+		version = model.ReceiptVersionV1
+	}
 	receipt := model.Receipt{
-		Version: model.ReceiptVersion, ID: id, RequestID: request.ID, RequestDigest: request.Digest,
+		Version: version, ID: id, RequestID: request.ID, RequestDigest: request.Digest,
 		Decision: decision, Reviewer: "reviewer@example.invalid", AdapterVersion: model.AdapterGitHubAddCollaboratorV1,
 		CreatedAt: model.Timestamp(now), ExpiresAt: model.Timestamp(now.Add(time.Hour)),
 	}

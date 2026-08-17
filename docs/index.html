@@ -36,13 +36,13 @@
           <a class="button primary" href="getting-started.html">Install the integrations</a>
           <a class="button" href="approval-timing.html">See the approval path</a>
         </div>
-        <p class="hero-note">Manual-first by design. An approval receipt is not execution, and a manual receipt is not external proof.</p>
+        <p class="hero-note">Trusted-execution by design. An execution receipt is not external proof.</p>
       </div>
 
       <div class="flow-card" aria-label="Airlock request flow overview">
         <div class="flow-head">
           <strong>request / review / verify</strong>
-          <span class="pill">manual-first</span>
+          <span class="pill">trusted execution</span>
         </div>
         <div class="flow-stack">
           <div class="flow-step">
@@ -65,7 +65,7 @@
           </div>
           <div class="flow-step human-gate">
             <span class="step-number">04</span>
-            <div><strong>Human executes</strong><span>manual provider action; no execution API</span></div>
+            <div><strong>Trusted node executes</strong><span>direct argv after persisted human approval</span></div>
             <span class="flow-arrow" aria-hidden="true">↓</span>
           </div>
           <div class="flow-step">
@@ -95,12 +95,12 @@
           <article class="card">
             <span class="card-icon" aria-hidden="true">H</span>
             <h3>Human at both gates</h3>
-            <p>A reviewer grants or rejects authority. After approval, an operator manually performs the locally reconstructed action.</p>
+            <p>A reviewer grants or rejects authority. After approval, Airlock directly runs the locally reconstructed configured argv.</p>
           </article>
           <article class="card">
             <span class="card-icon" aria-hidden="true">✓</span>
             <h3>Receipts are not reality</h3>
-            <p><code>manually_executed</code> records an operator claim. A separate read-only observation establishes the external result.</p>
+            <p><code>executed</code> records a trusted child success. A separate read-only observation establishes the external result.</p>
           </article>
         </div>
       </div>
@@ -126,7 +126,7 @@
           </article>
           <article class="process-step">
             <h3>Review and act</h3>
-            <p>The trusted node revalidates against local constraints and renders an action locally. A human reviews it, then manually executes it if approved.</p>
+            <p>The trusted node revalidates local constraints and renders an exact direct-exec plan. A human reviews it, then Airlock executes it after persisting the reservation.</p>
           </article>
           <article class="process-step">
             <h3>Observe</h3>
@@ -173,8 +173,8 @@
 
   <footer class="site-footer">
     <div class="shell footer-row">
-      <span>Airlock · manual-first authority requests</span>
-      <span>Package 0.2.0 · local requester deployment required</span>
+      <span>Airlock · trusted-execution authority requests</span>
+      <span>Package 0.3.0 · local requester deployment required</span>
     </div>
   </footer>
 </body>

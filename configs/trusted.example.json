@@ -1,8 +1,12 @@
 {
   "listen": "127.0.0.1:8788",
   "state_dir": "../../.local/state/airlock/trusted",
+  "control_socket": "../../.local/state/airlock/trusted/control.sock",
   "private_key_file": "trusted.key",
   "requester_url": "https://requester-node.example.invalid",
+  "github_cli_path": "/usr/bin/gh",
+  "github_config_dir": "../../.local/state/airlock/gh-config",
+  "execution_timeout": "30s",
   "poll_interval": "2s",
   "request_max_ttl": "15m",
   "catalog_ttl": "1h",

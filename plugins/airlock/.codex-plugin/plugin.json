@@ -1,6 +1,6 @@
 {
   "name": "airlock",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Persistent awareness and procedure for typed Airlock authority requests.",
   "author": {
     "name": "Airlock contributors",

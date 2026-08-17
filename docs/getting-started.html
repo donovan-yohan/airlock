@@ -117,7 +117,7 @@ python3 tools/airlock_bootstrap.py uninstall</code></pre>
             <div class="code-title"><span>terminal</span><span>separate Airlock repository</span></div>
             <pre><code>airlock requester serve --config /path/to/requester.json</code></pre>
           </div>
-          <p>Trusted-node deployment, keys, adapters, review UI, and manual provider execution remain separate operational responsibilities.</p>
+          <p>Trusted-node deployment, isolated GitHub CLI authentication, adapters, and the reviewer-only direct-execution UI remain separate operational responsibilities. Configure an absolute CLI path, isolated CLI config directory, and bounded timeout; never authenticate through the web UI.</p>
         </section>
       </article>
     </div>

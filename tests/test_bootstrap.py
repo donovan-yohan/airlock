@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,7 @@ def binary_after_dash():
     return args[args.index("--") + 1:]
 if args[:2] == ["plugins", "show"]:
     if os.environ.get("FAKE_HERMES_PLUGIN_MISSING"): raise SystemExit(1)
-    print("airlock v0.2.0\nStatus: enabled"); raise SystemExit(0)
+    print("airlock v0.3.0\nStatus: enabled"); raise SystemExit(0)
 if args[:2] == ["config", "get"]:
     if os.environ.get("FAKE_HERMES_GET_FAIL"):
         print("forced Hermes config read failure", file=sys.stderr); raise SystemExit(9)
@@ -173,6 +174,10 @@ class BootstrapTests(unittest.TestCase):
         self.assertLessEqual(len(skill.splitlines()), 80)
         self.assertEqual(claude["name"], codex["name"])
         self.assertEqual(claude["version"], codex["version"])
+        pyproject = tomllib.loads(
+            (ROOT / "integrations/hermes/pyproject.toml").read_text()
+        )
+        self.assertEqual(claude["version"], pyproject["project"]["version"])
         self.assertEqual(claude["skills"], codex["skills"])
         plugin_root = ROOT / "plugins/airlock"
         self.assertFalse(any(plugin_root.rglob("AGENTS.md")))

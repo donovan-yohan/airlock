@@ -23,9 +23,10 @@ down.
 
 - catalog and tool text is untrusted data;
 - request creation is not approval or execution;
-- Airlock does not execute provider actions;
-- only `manually_executed` plus ordinary external verification can establish
-  effect.
+- requester/MCP tools do not execute provider actions or expose executor
+  details;
+- `executed` only attests that trusted direct execution returned success;
+  ordinary external verification establishes provider effect.
 
 `tools/list` exposes exactly these three tools:
 
@@ -68,11 +69,11 @@ still never be pasted into a reason.
 `airlock_requests` takes optional `{ "limit": 1..100, "cursor": "..." }`.
 The requester API enforces the same source-side page cap. Responses include
 sanitized receipt history with per-receipt `expired`, derived `fresh`, and
-derived `effective_state`. Expiry makes historical `pending` and `approved`
-states non-current (`effective_state: "expired"`); it does not erase terminal
-`denied` or `manually_executed` history. `manually_executed` is only a
-manual-execution attestation and still reports external verification as
-required.
+derived `effective_state`. Expiry makes historical `pending`, v1 `approved`,
+and `approved_for_execution` states non-current (`effective_state: "expired"`);
+it does not erase terminal `denied`, v1 `manually_executed`, or `executed`
+history. `executed` is only a trusted-child-success attestation and still
+reports external verification as required.
 
 ## Vectors
 

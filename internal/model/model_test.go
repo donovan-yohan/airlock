@@ -145,10 +145,40 @@ func TestStateTransitions(t *testing.T) {
 	if next, err := NextRequestState("approved", DecisionExecute); err != nil || next != "manually_executed" {
 		t.Fatalf("execute transition: next=%q err=%v", next, err)
 	}
+	if next, err := NextRequestState("pending", DecisionApproveForExecution); err != nil || next != "approved_for_execution" {
+		t.Fatalf("v2 approval transition: next=%q err=%v", next, err)
+	}
+	if next, err := NextRequestState("approved_for_execution", DecisionExecuted); err != nil || next != "executed" {
+		t.Fatalf("v2 execution transition: next=%q err=%v", next, err)
+	}
+	if next, err := NextRequestState("approved_for_execution", DecisionApproveForExecution); err != nil || next != "approved_for_execution" {
+		t.Fatalf("v2 retry approval transition: next=%q err=%v", next, err)
+	}
 	for _, invalid := range [][2]string{{"pending", DecisionExecute}, {"approved", DecisionDeny}, {"denied", DecisionApprove}, {"manually_executed", DecisionExecute}} {
 		if _, err := NextRequestState(invalid[0], invalid[1]); err == nil {
 			t.Fatalf("invalid transition accepted: %#v", invalid)
 		}
+	}
+}
+
+func TestReceiptVersionsBindDecisionFamilies(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	request := validRequest(now)
+	if err := SetRequestDigest(&request); err != nil {
+		t.Fatal(err)
+	}
+	v2 := Receipt{Version: ReceiptVersion, ID: "rec_0123456789abcdefghij", RequestID: request.ID, RequestDigest: request.Digest, Decision: DecisionApproveForExecution, Reviewer: "reviewer@example.invalid", AdapterVersion: AdapterGitHubAddCollaboratorV1, CreatedAt: Timestamp(now), ExpiresAt: Timestamp(now.Add(time.Hour))}
+	if err := ValidateReceipt(v2, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	v2.Decision = DecisionApproveForManualExecution
+	if err := ValidateReceipt(v2, now, time.Hour); err == nil {
+		t.Fatal("v2 accepted v1 manual-execution decision")
+	}
+	v2.Version = ReceiptVersionV1
+	v2.Decision = DecisionExecuted
+	if err := ValidateReceipt(v2, now, time.Hour); err == nil {
+		t.Fatal("v1 accepted execution-only decision")
 	}
 }
 
@@ -174,7 +204,7 @@ func validRequest(now time.Time) Request {
 
 func validReceipt(now time.Time, request Request) Receipt {
 	return Receipt{
-		Version: ReceiptVersion, ID: "rec_0123456789abcdefghij", RequestID: request.ID,
+		Version: ReceiptVersionV1, ID: "rec_0123456789abcdefghij", RequestID: request.ID,
 		RequestDigest: request.Digest, Decision: DecisionApprove, Reviewer: "reviewer@example.invalid",
 		AdapterVersion: AdapterGitHubAddCollaboratorV1, CreatedAt: Timestamp(now), ExpiresAt: Timestamp(now.Add(time.Hour)),
 	}

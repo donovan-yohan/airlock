@@ -5,9 +5,9 @@ Airlock lets untrusted AI agents request narrow, human-reviewed authority withou
 It uses a two-node design:
 
 - the **requester node** exposes a signed capability catalog, accepts typed requests, and returns sanitized request and receipt state;
-- the **trusted node** holds the signing key and local policy, reconstructs actions from validated fields, and presents them for manual human execution.
+- the **trusted node** holds the signing key and local policy, reconstructs one allowlisted action from validated fields, and executes its configured absolute GitHub CLI directly after trusted human approval.
 
-A request is not authorization. An approval is not execution. Even a `manually_executed` receipt is only a signed record and must be checked against the external system before an agent claims the effect happened.
+A request is not authorization. `approved_for_execution` records a trusted reservation; `executed` only attests that the trusted child process returned success. Independent read-only provider verification is still required before an agent claims the effect happened. Historical v1 `manually_executed` receipts remain readable.
 
 ## Repository layout
 
@@ -29,7 +29,7 @@ Airlock is intentionally narrow:
 
 - requester and MCP input is always hostile data;
 - requester-supplied shell text is never executed;
-- trusted adapters reconstruct commands only from typed, locally configured, validated fields;
+- trusted adapters reconstruct a direct-exec plan only from typed, locally configured, validated fields; no shell or PATH lookup is used;
 - capability catalogs and receipts are signed with Ed25519;
 - requester-facing services bind to loopback by default;
 - no provider credentials, tokens, or production identities belong in this repository;
@@ -56,6 +56,21 @@ go run ./cmd/airlock keygen \
 ```
 
 The deployment guide covers requester and trusted-node startup, state paths, and systemd hardening: [docs/deployment.md](docs/deployment.md).
+
+With the trusted service running under its dedicated Unix account, its local
+operator CLI talks only to the daemon-owned control socket:
+
+```sh
+airlock trusted requests list --config "$HOME/.config/airlock/trusted.json" [--cursor CURSOR]
+airlock trusted request show --config "$HOME/.config/airlock/trusted.json" --id REQUEST_ID
+airlock trusted request execute --config "$HOME/.config/airlock/trusted.json" --id REQUEST_ID
+airlock trusted request deny --config "$HOME/.config/airlock/trusted.json" --id REQUEST_ID
+```
+
+The CLI never reads trusted state, loads the signing key, or invokes `gh`; it
+requires the running trusted daemon and reports the daemon's persisted state.
+List returns at most four sanitized records and an optional `next_cursor`; pass
+that value with `--cursor` to read the next page.
 
 ## Agent integrations
 
@@ -89,8 +104,9 @@ python3 tools/airlock_bootstrap.py validate
 
 cd integrations/hermes
 uv run --locked pytest -q
-uv run --locked ruff check hermes_plugin_airlock tests
-uv run --locked python -m compileall -q __init__.py hermes_plugin_airlock tests
+uv lock --check
+uv run --locked ruff check hermes_plugin_airlock tests ../../tests
+uv run --locked python -m compileall -q __init__.py hermes_plugin_airlock tests ../../tests
 hermes plugins doctor . --ci
 cd ../..
 ```

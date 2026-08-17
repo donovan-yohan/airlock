@@ -28,6 +28,7 @@ before starting either service:
 install -d -m 0700 "$HOME/.config/airlock"
 install -d -m 0700 "$HOME/.local/state/airlock/requester"
 install -d -m 0700 "$HOME/.local/state/airlock/trusted"
+install -d -m 0700 "$HOME/.local/state/airlock/gh-config"
 ```
 
 Start from `configs/requester.example.json` and
@@ -36,6 +37,55 @@ directory. Create each state directory with mode `0700`; Airlock refuses a
 group- or world-accessible state directory and writes state files with mode
 `0600`.
 
+The trusted configuration must name an absolute `github_cli_path`, an isolated
+owner-private real `0700` `github_config_dir`, a bounded `execution_timeout`,
+and `control_socket`. The daemon creates a missing GitHub config directory with
+mode `0700` and refuses a symlink, non-directory, or group- or world-accessible
+directory. Do not inspect or log its credential contents.
+
+Relative directory and socket paths resolve from the trusted config file. The
+socket must be a direct child of the trusted state directory. The daemon creates it
+with mode `0600` inside an owner-private `0700` directory, rejects a symlink or
+non-socket at that path, removes only a safely detected stale socket, and
+removes its socket during clean shutdown. It is never served over the Tailnet
+or the TCP web listener. A sibling owner-only `0600` lifecycle-lock file is
+held for the daemon lifetime, so a second daemon cannot clean up, replace, or
+bind the active socket; the kernel releases that lock if the daemon crashes.
+
+The local control plane requires Linux. Before HTTP can receive bytes, the
+daemon reads each accepted Unix-socket peer's `SO_PEERCRED` and requires its UID
+to equal the daemon's effective UID. Directory and socket modes remain
+defense-in-depth only; they are not treated as equivalent authentication. On an
+unsupported platform, the trusted daemon refuses to start its control socket
+rather than falling back to filesystem-mode authorization.
+
+Authenticate the configured CLI in its isolated directory before starting the
+trusted service; authentication is an operator setup step and never occurs in
+the web UI. Do not use a home-wide GitHub CLI config directory.
+
+Run the trusted user service and terminal controls as the same dedicated,
+unprivileged Unix account. Same-UID Linux peer credentials are the local control
+authorization boundary, not an individual human identity: any process running
+under the trusted daemon UID can authorize CLI actions. Deploy a dedicated
+trusted/operator Unix account with no untrusted agent processes, and do not
+share that account with unrelated services:
+
+```sh
+airlock trusted requests list --config "$HOME/.config/airlock/trusted.json" [--cursor CURSOR]
+airlock trusted request show --config "$HOME/.config/airlock/trusted.json" --id REQUEST_ID
+airlock trusted request execute --config "$HOME/.config/airlock/trusted.json" --id REQUEST_ID
+airlock trusted request deny --config "$HOME/.config/airlock/trusted.json" --id REQUEST_ID
+```
+
+The local-control list response contains at most four sanitized records and an optional
+`next_cursor`; pass it as `--cursor` to retrieve the next page.
+
+Linux peer credentials are the local CLI authorization boundary. Airlock derives
+the CLI reviewer identity from the daemon's Unix UID; the client cannot send a
+reviewer name, header, token, credentials, or arbitrary command. Root is outside
+this application threat model. The CLI must fail when the daemon or socket is
+absent; it never falls back to direct state writes, signing, or `gh`.
+
 The example systemd user units assume state under
 `$HOME/.local/state/airlock/{requester,trusted}`. Copy the matching unit, then
 use `systemctl --user enable --now ...`. Do not put credentials in a unit,
@@ -43,11 +93,11 @@ config, environment file, or catalog.
 
 ## State retention and rotation
 
-Both node stores keep at most 4,096 request records so their worst-case state
-remains below the atomic state-file ceiling. A full requester rejects new
-requests, and a full trusted node rejects additional ingest; both continue
-processing receipts and decisions for existing records. Expired records remain
-only through the latest window in which a timely receipt could still be
+The requester keeps at most 4,096 requests. The trusted store keeps at most
+1,024 requests and four bounded execution attempts per request, keeping its
+worst-case JSON below the shared atomic state-file ceiling. A full store rejects
+new work but continues receipt delivery for existing records. Expired records
+remain only through the latest window in which a timely receipt could still be
 delivered, then are pruned.
 
 On restart, records that no longer validate under tightened TTL bounds or the
@@ -87,17 +137,34 @@ proxy would break the identity-header trust contract. `--dev` disables the
 Tailscale header and instead requires `X-Airlock-Dev-Identity`; use it only for
 local smoke/testing.
 
-## Manual decision semantics
+## Trusted execution semantics and rollout
 
-`approved_for_manual_execution` means the reviewer has approved the exact
-digest for manual use. It does not invoke or attest success at GitHub.
-`manually_executed` is available only after approval and records the reviewer's
-statement that they ran the displayed command. Although the ADR sketches an
-optional evidence field, this MVP rejects every non-empty value: unrestricted
-text cannot guarantee that a reviewer will not paste credential material.
-Structured provider evidence is deferred. The requester should independently
-verify provider state using its own separately authorized identity when
-possible.
+`approved_for_execution` is durably signed and paired with a local `running`
+attempt before the configured absolute `gh` is started. The child receives a
+fixed minimal environment, including only the isolated `GH_CONFIG_DIR`,
+noninteractive/no-color settings, safe HOME/locale, and fixed PATH; inherited
+tokens, proxies, and home configuration are not supplied. It is direct
+`os/exec`, never shell parsing.
 
-This two-step interpretation is the fail-closed resolution of the packet's
-separate “approve” and “mark manually executed” actions. Denial is terminal.
+`executed` is emitted only after a zero exit and atomic completion persistence.
+It does not prove GitHub state; independently read provider state. A missing
+executable or other proven pre-invocation start failure is recorded as `failed`
+and can be retried. A timeout, cancellation, interrupted daemon, generic
+non-zero exit, expired completion, or completion-write failure is `uncertain`:
+GitHub might already have accepted the collaborator PUT. No ambiguous outcome
+emits `executed`. A fresh explicit web or CLI retry is required after read-only
+verification as appropriate. The GitHub endpoint documents `201` for a new
+invitation and `204` for existing access; Airlock does not treat that as a
+formal duplicate-invitation retry guarantee.
+
+After approval and the `running` reservation persist, a web or local-control
+disconnect does not revoke daemon-owned execution. During daemon shutdown,
+Airlock stops admitting executes, cancels active children, and waits within its
+bounded shutdown deadline for their terminal persistence. A canceled child is
+recorded as `uncertain` with `cancelled`; it never produces `executed`.
+
+Upgrade requester integrations first, then the trusted node. Older requester
+versions reject `airlock.receipt/v2` and its new decisions. Both upgraded nodes
+retain read/validation/recovery for v1 `approved_for_manual_execution` and
+`manually_executed` history. Receipts and attempts intentionally omit output,
+environment, provider body, credentials, and free-form command text.

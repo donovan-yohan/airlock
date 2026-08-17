@@ -1,6 +1,6 @@
 # ADR 0001: two-node authority boundary
 
-Status: accepted for MVP
+Status: accepted; trusted execution added
 
 ## Context
 
@@ -33,8 +33,19 @@ Build one Go binary with requester and trusted-node modes.
 - Keeps its private signing key and any human credentials local.
 - Validates every request against locally installed, versioned adapter code and constraints. Requester-supplied shell text is not a valid action.
 - Renders the request in a UI served by the trusted node itself. The requester must not provide the approving UI code.
-- Derives commands and URLs locally from typed arguments.
-- MVP is manual-only: copy/open actions are allowed, automatic execution is absent.
+- Reconstructs one typed direct-exec plan from typed arguments: an absolute
+  configured executable and exact argv vector. It never runs a shell, performs
+  PATH lookup, or consumes requester command text.
+- Uses a dedicated isolated GitHub CLI config directory and a fixed minimal
+  child environment. Operator authentication is local setup outside the UI.
+- Persists approval plus a `running` attempt reservation before invoking the
+  child, then executes outside the store mutex. Replays/concurrent POSTs cannot
+  start another child for the same request.
+- Owns trusted state, attempts, signing, receipt delivery, and the provider
+  process in one daemon. Its owner-private Unix socket is a local-only control
+  plane for the same Unix account; the web UI and CLI share one action service.
+  The socket is not a Tailnet or TCP web API and the caller cannot select a
+  reviewer identity or submit command text.
 - Signs receipts over the exact request digest and human decision. Receipts contain no credential material.
 
 ### Human identity
@@ -84,9 +95,25 @@ The catalog says what may be requested. It grants nothing. The trusted adapter a
 }
 ```
 
-### Receipt
+### Receipt and execution state
 
-A trusted-node Ed25519 signature covers the request digest, decision, reviewer identity, trusted adapter version, timestamp, and optional externally observable evidence. A receipt is an attestation, not proof of external state; the requester independently verifies provider state whenever its own identity can observe it.
+A trusted-node Ed25519 signature covers the request digest, decision, reviewer
+identity, trusted adapter version, and timestamp. New receipts use
+`airlock.receipt/v2` with `approved_for_execution`, `denied`, or `executed`.
+`executed` is emitted only when direct execution returned zero **and** the
+terminal receipt plus attempt completion were atomically persisted. It attests
+only to that local child result, not external provider state.
+
+For recovery, readers retain support for persisted `airlock.receipt/v1`
+`approved_for_manual_execution` and `manually_executed` records. New requester
+and integration clients must recognize both state families during a coordinated
+requester-first upgrade: upgrade requester/integrations before a trusted node
+can publish v2 receipts. A running attempt recovers as `uncertain` with an
+`interrupted` code and never resumes automatically. Only proven pre-invocation
+failures are `failed`; timeouts and non-zero provider exits are `uncertain`.
+Any retry is a fresh explicit web or local-CLI decision after verification.
+GitHub documents `201` for a new invitation and `204` for existing access, but
+Airlock does not claim that ambiguous duplicate invitations are retry-idempotent.
 
 ## MVP adapter
 
@@ -96,7 +123,8 @@ A trusted-node Ed25519 signature covers the request digest, decision, reviewer i
 - repository matching GitHub's conservative repository-name grammar;
 - permission in the locally allowed set.
 
-It derives this command locally:
+It reconstructs this direct-exec argv locally (with the executable selected
+only from trusted configuration):
 
 ```bash
 gh api --method PUT \
@@ -107,11 +135,21 @@ gh api --method PUT \
 
 No arbitrary command action exists.
 
+The daemon's local control protocol exposes only bounded list/show/execute/deny
+operations for these sanitized typed records. Local-control list responses contain
+at most four records and use a bounded cursor for pagination. It has strict methods, JSON
+body, query, and identifier bounds; it never returns a signing key, credential,
+raw provider output, process environment, or arbitrary command endpoint.
+
 ## Non-negotiable invariants
 
 - Model-readable content may request authority but cannot grant it.
 - No human or provider credential crosses from trusted node to requester.
 - No requester-provided string reaches a shell interpreter as executable code.
+- Approval/reservation persistence happens before provider effect; a persistence
+  failure prevents invocation.
+- Child stdout, stderr, environment, provider bodies, credential data, and
+  unrestricted command text are never persisted, logged, or rendered.
 - Display and receipt bind to the same canonical request digest.
 - Unknown, expired, replayed, malformed, mutated, or unsupported requests fail closed.
 - Trusted-node private keys and credentials never appear in logs, receipts, catalogs, requests, or UI responses.
@@ -152,7 +190,6 @@ Migration requirements:
 
 ## Deferred
 
-- Automatic execution of allowlisted adapters.
 - Mobile-native approver app and custom URL scheme.
 - Passkey step-up for high-risk actions.
 - Organization/team-wide GitHub administration.

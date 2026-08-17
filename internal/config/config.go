@@ -12,11 +12,16 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/donovan-yohan/airlock/internal/model"
 )
 
-const maxConfigBytes = 1 << 20
+const (
+	maxConfigBytes      = 1 << 20
+	maxTrustedPathBytes = 1024
+)
 
 type Requester struct {
 	Listen               string `json:"listen"`
@@ -37,16 +42,20 @@ type TrustedCapability struct {
 }
 
 type Trusted struct {
-	Listen         string              `json:"listen"`
-	StateDir       string              `json:"state_dir"`
-	PrivateKeyFile string              `json:"private_key_file"`
-	RequesterURL   string              `json:"requester_url"`
-	PollInterval   string              `json:"poll_interval"`
-	RequestMaxTTL  string              `json:"request_max_ttl"`
-	CatalogTTL     string              `json:"catalog_ttl"`
-	ReceiptTTL     string              `json:"receipt_ttl"`
-	AllowedLogins  []string            `json:"allowed_logins"`
-	Capabilities   []TrustedCapability `json:"capabilities"`
+	Listen           string              `json:"listen"`
+	StateDir         string              `json:"state_dir"`
+	ControlSocket    string              `json:"control_socket"`
+	PrivateKeyFile   string              `json:"private_key_file"`
+	RequesterURL     string              `json:"requester_url"`
+	GitHubCLIPath    string              `json:"github_cli_path"`
+	GitHubConfigDir  string              `json:"github_config_dir"`
+	ExecutionTimeout string              `json:"execution_timeout"`
+	PollInterval     string              `json:"poll_interval"`
+	RequestMaxTTL    string              `json:"request_max_ttl"`
+	CatalogTTL       string              `json:"catalog_ttl"`
+	ReceiptTTL       string              `json:"receipt_ttl"`
+	AllowedLogins    []string            `json:"allowed_logins"`
+	Capabilities     []TrustedCapability `json:"capabilities"`
 }
 
 func LoadRequester(path string) (Requester, error) {
@@ -85,15 +94,39 @@ func LoadTrusted(path string) (Trusted, error) {
 		return cfg, err
 	}
 	base := filepath.Dir(path)
-	cfg.StateDir = resolvePath(base, cfg.StateDir)
-	cfg.PrivateKeyFile = resolvePath(base, cfg.PrivateKeyFile)
-	if cfg.Listen == "" || cfg.StateDir == "" || cfg.PrivateKeyFile == "" || cfg.RequesterURL == "" {
-		return cfg, errors.New("listen, state_dir, private_key_file, and requester_url are required")
+	// Execution config is handed to a child process, so unlike the other
+	// repository-relative file settings it is normalized to an absolute path
+	// before the strict direct-exec validation below.
+	executionBase, err := filepath.Abs(base)
+	if err != nil {
+		return cfg, fmt.Errorf("resolve trusted execution config directory: %w", err)
+	}
+	cfg.StateDir = resolvePath(executionBase, cfg.StateDir)
+	cfg.PrivateKeyFile = resolvePath(executionBase, cfg.PrivateKeyFile)
+	cfg.GitHubConfigDir = resolvePath(executionBase, cfg.GitHubConfigDir)
+	cfg.ControlSocket = resolvePath(executionBase, cfg.ControlSocket)
+	if cfg.Listen == "" || cfg.StateDir == "" || cfg.ControlSocket == "" || cfg.PrivateKeyFile == "" || cfg.RequesterURL == "" || cfg.GitHubCLIPath == "" || cfg.GitHubConfigDir == "" || cfg.ExecutionTimeout == "" {
+		return cfg, errors.New("listen, state_dir, control_socket, private_key_file, requester_url, github_cli_path, github_config_dir, and execution_timeout are required")
 	}
 	if _, _, _, _, err := cfg.Durations(); err != nil {
 		return cfg, err
 	}
 	if err := validateRequesterURL(cfg.RequesterURL); err != nil {
+		return cfg, err
+	}
+	if err := validateTrustedAbsolutePath("github_cli_path", cfg.GitHubCLIPath); err != nil {
+		return cfg, err
+	}
+	if err := validateTrustedAbsolutePath("github_config_dir", cfg.GitHubConfigDir); err != nil {
+		return cfg, err
+	}
+	if err := validateTrustedAbsolutePath("control_socket", cfg.ControlSocket); err != nil {
+		return cfg, err
+	}
+	if err := validateControlSocketPath(cfg.StateDir, cfg.ControlSocket); err != nil {
+		return cfg, err
+	}
+	if _, err := cfg.ExecutionDuration(); err != nil {
 		return cfg, err
 	}
 	if len(cfg.AllowedLogins) == 0 {
@@ -138,6 +171,27 @@ func LoadTrusted(path string) (Trusted, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func validateControlSocketPath(stateDir, socket string) error {
+	absStateDir, err := filepath.Abs(stateDir)
+	if err != nil {
+		return fmt.Errorf("resolve state_dir for control_socket: %w", err)
+	}
+	relative, err := filepath.Rel(filepath.Clean(absStateDir), socket)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("control_socket must remain inside state_dir")
+	}
+	if filepath.Dir(socket) != filepath.Clean(absStateDir) {
+		return errors.New("control_socket must be a direct child of state_dir")
+	}
+	return nil
+}
+
+// ExecutionDuration is deliberately separate from the polling/receipt tuple:
+// execution has a tighter bound and must never silently inherit a default.
+func (c Trusted) ExecutionDuration() (time.Duration, error) {
+	return boundedDuration("execution_timeout", c.ExecutionTimeout, 0, time.Second, 5*time.Minute)
 }
 
 func (c Trusted) Durations() (poll, request, catalog, receipt time.Duration, err error) {
@@ -209,6 +263,18 @@ func resolvePath(base, value string) string {
 		return value
 	}
 	return filepath.Clean(filepath.Join(base, value))
+}
+
+func validateTrustedAbsolutePath(name, value string) error {
+	if value == "" || len(value) > maxTrustedPathBytes || !utf8.ValidString(value) || !filepath.IsAbs(value) || filepath.Clean(value) != value || value == string(filepath.Separator) {
+		return fmt.Errorf("%s must be a clean non-root absolute path", name)
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return fmt.Errorf("%s must be a clean non-root absolute path", name)
+		}
+	}
+	return nil
 }
 
 func validateRequesterURL(raw string) error {

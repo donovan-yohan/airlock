@@ -194,7 +194,7 @@ func ValidateRequestAgainstCapability(r Request, capability Capability) error {
 }
 
 func ValidateReceipt(r Receipt, now time.Time, maxLifetime time.Duration) error {
-	if r.Version != ReceiptVersion {
+	if r.Version != ReceiptVersion && r.Version != ReceiptVersionV1 {
 		return errors.New("unsupported receipt version")
 	}
 	if !objectIDPattern.MatchString(r.ID) || !strings.HasPrefix(r.ID, "rec_") {
@@ -206,7 +206,7 @@ func ValidateReceipt(r Receipt, now time.Time, maxLifetime time.Duration) error 
 	if !digestPattern.MatchString(r.RequestDigest) {
 		return errors.New("invalid receipt request digest")
 	}
-	if r.Decision != DecisionApprove && r.Decision != DecisionDeny && r.Decision != DecisionExecute {
+	if !validReceiptDecision(r.Version, r.Decision) {
 		return errors.New("invalid receipt decision")
 	}
 	if err := validateText(r.Reviewer, 1, 254); err != nil {
@@ -231,14 +231,34 @@ func ValidateReceipt(r Receipt, now time.Time, maxLifetime time.Duration) error 
 	return nil
 }
 
+func validReceiptDecision(version, decision string) bool {
+	switch version {
+	case ReceiptVersionV1:
+		return decision == DecisionApproveForManualExecution || decision == DecisionDeny || decision == DecisionManuallyExecuted
+	case ReceiptVersion:
+		return decision == DecisionApproveForExecution || decision == DecisionDeny || decision == DecisionExecuted
+	default:
+		return false
+	}
+}
+
 func NextRequestState(current, decision string) (string, error) {
 	switch {
-	case current == "pending" && decision == DecisionApprove:
+	case current == "pending" && decision == DecisionApproveForManualExecution:
 		return "approved", nil
 	case current == "pending" && decision == DecisionDeny:
 		return "denied", nil
-	case current == "approved" && decision == DecisionExecute:
+	case current == "approved" && decision == DecisionManuallyExecuted:
 		return "manually_executed", nil
+	case current == "pending" && decision == DecisionApproveForExecution:
+		return "approved_for_execution", nil
+	case current == "approved_for_execution" && decision == DecisionApproveForExecution:
+		// A failed/uncertain provider attempt needs a fresh explicit approval
+		// receipt before an allowed retry. The requester has no provider-attempt
+		// records, so this is its durable retry representation.
+		return "approved_for_execution", nil
+	case current == "approved_for_execution" && decision == DecisionExecuted:
+		return "executed", nil
 	default:
 		return "", fmt.Errorf("invalid transition from %q using %q", current, decision)
 	}

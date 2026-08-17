@@ -74,17 +74,18 @@
           <p class="kicker">Trusted side</p>
           <h2>Revalidate and reconstruct locally</h2>
           <p>The trusted node pulls requests rather than accepting inbound trusted action text. It verifies the signed catalog context, request digest, expiry, capability identity, and a versioned local adapter's constraints. Request IDs are idempotent and cannot be reused with a different bound digest.</p>
-          <p>Only then does it render a locally reconstructed action for human review. Requester-supplied shell commands are never executed because no generic command field exists.</p>
+          <p>Only then does it render a locally reconstructed plan for human review. The configured absolute GitHub CLI and exact argv are passed directly with a fixed minimal environment: no shell, PATH lookup, inherited token/proxy environment, or generic command field exists.</p>
+          <p>Linux local control uses an owner-private Unix socket and verifies <code>SO_PEERCRED</code> for every accepted connection before HTTP reads it. The peer UID must equal the daemon's effective UID; filesystem modes are defense-in-depth, not an authentication substitute. Unsupported platforms fail closed instead of exposing this control plane without peer credentials.</p>
         </section>
 
         <section id="human">
           <p class="kicker">Human boundary</p>
-          <h2>Two deliberate human acts</h2>
+          <h2>One trusted human approval before direct execution</h2>
           <ol>
-            <li><strong>Decision:</strong> inspect the validated request and reconstructed action, then approve or reject.</li>
-            <li><strong>Execution:</strong> after approval, manually perform the provider action and record the outcome.</li>
+            <li><strong>Decision:</strong> inspect the validated request and exact plan, then choose Approve and execute or deny.</li>
+            <li><strong>Attempt:</strong> Airlock persists approval plus a running reservation, then executes outside its store lock. Failures are bounded and retries are explicit.</li>
           </ol>
-          <p>The services do not bridge those steps automatically. See the <a href="approval-timing.html">approval timing diagram</a> for the full sequence.</p>
+          <p>Requester/MCP/Hermes surfaces do not bridge this action. See the <a href="approval-timing.html">approval timing diagram</a> for the full sequence.</p>
         </section>
 
         <section id="installer">
@@ -103,7 +104,7 @@
         <section id="receipts">
           <p class="kicker">Evidence semantics</p>
           <h2>Receipts describe workflow state, not external truth</h2>
-          <p><code>approved</code> proves a trusted reviewer decision. <code>manually_executed</code> proves that an operator recorded a manual attempt. Neither proves the provider accepted the action or that the intended state exists.</p>
+          <p><code>approved_for_execution</code> proves a trusted reviewer reservation. <code>executed</code> proves only that the trusted child returned success and its completion persisted. Neither proves the provider accepted the action or that the intended state exists.</p>
           <p>Every success claim therefore ends with an independent ordinary read-only verification path.</p>
         </section>
       </article>

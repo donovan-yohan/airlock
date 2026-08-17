@@ -1,6 +1,6 @@
 # Airlock architecture diagrams
 
-These diagrams describe the cross-harness package in this repository and the wider Airlock system it connects to. The package remains on the untrusted requester node: it provides awareness and typed tools, not credentials, approval, or execution authority.
+These diagrams describe the cross-harness package in this repository and the wider Airlock system it connects to. The package remains on the untrusted requester node: it provides awareness and typed create/observe tools, not credentials, approval, or execution authority.
 
 The dedicated approval timeline is in [`approval-timing.md`](approval-timing.md). Raw Mermaid sources live in [`diagrams/`](diagrams/) and are kept byte-for-byte aligned with the fenced diagrams below.
 
@@ -39,16 +39,16 @@ flowchart TB
   Requester -->|"returns typed request and signed catalog data"| Trusted
   Trusted -->|"checks local adapter and constraints"| Adapter
   Trusted -->|"renders a locally reconstructed action"| Review
-  Human -->|"decides and records manual outcome"| Review
+  Human -->|"approves or denies exact direct-exec plan"| Review
   Review -->|"persists trusted decision"| TrustedState
-  Human -->|"manually performs approved action"| Provider
+  Review -->|"direct exec configured gh after durable reservation"| Provider
   Trusted -->|"publishes sanitized signed receipt"| Requester
   Harness -->|"polls sanitized request state"| MCP
   Verify -->|"reads ordinary external state"| Provider
   Verify -->|"reports observed effect"| User
 ```
 
-**What this shows:** credentials and executable provider actions stay outside the untrusted node. The requester stores typed requests and sanitized receipts; the trusted service revalidates them against local adapters, and a human performs the external action. Even the final receipt is followed by an independent read-only verification path.
+**What this shows:** credentials and executable provider actions stay outside the untrusted node. The requester stores typed requests and sanitized receipts; the trusted service revalidates them against local adapters, and a human approves its one direct action. Even an `executed` receipt is followed by an independent read-only verification path.
 
 ## Installation and ownership topology
 
@@ -135,5 +135,5 @@ flowchart LR
 - No generic shell runner or requester-supplied command execution.
 - No trusted credentials, approval tokens, or provider execution URLs cross to the requester node.
 - No hook automatically converts another tool failure into an Airlock request.
-- `approved` is not execution, and `manually_executed` is not independent proof of the external effect.
+- `approved_for_execution` is not provider execution, and `executed` is not independent proof of the external effect. Historical v1 manual receipts remain readable.
 - The cross-harness package does not install the native Hermes plugin; it verifies that prerequisite before enabling its prompt section.

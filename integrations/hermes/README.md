@@ -53,7 +53,7 @@ The URL must be plain HTTP on an explicit loopback IP and port. `localhost`, rem
 
 ## Semantics
 
-`airlock_create_request` returning `pending` means only that the local requester accepted and persisted a request. `approved` means a trusted reviewer approved the locally rendered action for manual execution. Only `manually_executed` records that the reviewer said the action was manually performed. External state still needs verification before claiming the requested effect actually exists.
+`airlock_create_request` returning `pending` means only that the local requester accepted and persisted a request. `approved_for_execution` means a trusted reviewer authorized a locally reconstructed execution attempt. `executed` only records that the trusted child returned success. External state still needs verification before claiming the requested effect exists; v1 manual states remain readable for rollout recovery.
 
 This is not a Hermes approval transport. Hermes tool approvals govern Hermes-owned tool execution; Airlock requests authority held on another node and cannot auto-approve or auto-execute it.
 

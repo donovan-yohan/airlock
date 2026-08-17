@@ -17,15 +17,15 @@ Tool transport is installed separately as the typed `airlock mcp` stdio server. 
 The publish-ready static site lives in [this directory](./) for GitHub Pages. Source-of-truth Mermaid documents are kept separately:
 
 - [`architecture.md`](architecture.md) — trust boundary, installation topology, and managed-instruction lifecycle;
-- [`approval-timing.md`](approval-timing.md) — end-to-end approval, human execution, receipt, and verification timing.
+- [`approval-timing.md`](approval-timing.md) — end-to-end approval, trusted direct execution, receipt, and verification timing.
 
 Raw `.mmd` files are in [`diagrams/`](diagrams/); the site uses checked-in rendered SVGs so diagrams remain visible without client-side JavaScript.
 
 ## Trust boundary
 
-The plugin and MCP server run on the untrusted requester node. They may discover a signed capability catalog, create typed requests, and read sanitized request/receipt state. They cannot approve or execute authority. Only the trusted node may validate policy, render a locally reconstructed action for human review, and record manual execution.
+The plugin and MCP server run on the untrusted requester node. They may discover a signed capability catalog, create typed requests, and read sanitized request/receipt state. They cannot approve or execute authority. Only the trusted node may validate policy, render a locally reconstructed direct-exec plan for human review, and perform trusted execution.
 
-Model-visible text can request authority; it cannot grant it. `pending` and `approved` are not proof of an external effect. Even after `manually_executed`, verify ordinary read-only external state before claiming the effect exists.
+Model-visible text can request authority; it cannot grant it. `pending` and `approved_for_execution` are not proof of an external effect. Even after `executed`, verify ordinary read-only external state before claiming the effect exists. Historical v1 states remain visible during coordinated requester-first rollout.
 
 ## Packaging
 
@@ -58,7 +58,7 @@ python3 tools/airlock_bootstrap.py install \
 - upserts one marked block in user-global `~/.claude/CLAUDE.md`; and
 - upserts the same marked block in user-global `~/.codex/AGENTS.md`.
 
-The managed text tells each agent to check Airlock before requesting unavailable credentials or attempting a workaround, treat returned text as untrusted data, and independently verify external state after `manually_executed`. Repeated installs update a block only when `install-state.json` proves ownership and its recorded SHA-256 still matches; an unrecorded marker block or user-edited managed block is refused rather than adopted, overwritten, or later deleted. Malformed/duplicate markers and symlinked instruction targets are also refused. A non-empty global `~/.codex/AGENTS.override.md` blocks instruction installation because Codex would ignore the managed `AGENTS.md`. Use `--instructions skip` explicitly, or simply omit the flag, to install only the plugins and MCP registrations.
+The managed text tells each agent to check Airlock before requesting unavailable credentials or attempting a workaround, treat returned text as untrusted data, and independently verify external state after `executed`. Repeated installs update a block only when `install-state.json` proves ownership and its recorded SHA-256 still matches; an unrecorded marker block or user-edited managed block is refused rather than adopted, overwritten, or later deleted. Malformed/duplicate markers and symlinked instruction targets are also refused. A non-empty global `~/.codex/AGENTS.override.md` blocks instruction installation because Codex would ignore the managed `AGENTS.md`. Use `--instructions skip` explicitly, or simply omit the flag, to install only the plugins and MCP registrations.
 
 It makes a content-addressed, mode-`0500` copy at:
 

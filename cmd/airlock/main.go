@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -41,10 +42,7 @@ func run(args []string) error {
 		}
 		return serveRequester(args[2:])
 	case "trusted":
-		if len(args) < 2 || args[1] != "serve" {
-			return usageError()
-		}
-		return serveTrusted(args[2:])
+		return trustedCommand(args[1:])
 	case "request":
 		if len(args) < 2 || args[1] != "create" {
 			return usageError()
@@ -54,6 +52,33 @@ func run(args []string) error {
 		return generateKeys(args[1:])
 	case "mcp":
 		return serveMCP(args[1:])
+	default:
+		return usageError()
+	}
+}
+
+func trustedCommand(args []string) error {
+	if len(args) == 0 {
+		return usageError()
+	}
+	switch args[0] {
+	case "serve":
+		return serveTrusted(args[1:])
+	case "requests":
+		if len(args) < 2 || args[1] != "list" {
+			return usageError()
+		}
+		return trustedRequestsList(args[2:])
+	case "request":
+		if len(args) < 2 {
+			return usageError()
+		}
+		switch args[1] {
+		case "show", "execute", "deny":
+			return trustedRequestControl(args[1], args[2:])
+		default:
+			return usageError()
+		}
 	default:
 		return usageError()
 	}
@@ -88,7 +113,7 @@ func serveRequester(args []string) error {
 	logger := log.New(os.Stderr, "airlock requester: ", log.LstdFlags|log.LUTC)
 	server := hardenedServer(requester.NewServer(store).Handler(), logger)
 	logger.Printf("listening on %s", listener.Addr())
-	return serveUntilSignal(server, listener, nil)
+	return serveUntilSignal(server, listener, nil, nil)
 }
 
 func serveTrusted(args []string) error {
@@ -105,18 +130,27 @@ func serveTrusted(args []string) error {
 		return err
 	}
 	pollInterval, requestTTL, catalogTTL, receiptTTL, _ := cfg.Durations()
+	executionTimeout, _ := cfg.ExecutionDuration()
 	privateKey, err := keys.LoadPrivate(cfg.PrivateKeyFile)
 	if err != nil {
 		return err
 	}
-	store, err := trusted.NewStore(cfg.StateDir, privateKey, cfg.Capabilities, requestTTL, receiptTTL)
+	store, err := trusted.NewStore(cfg.StateDir, privateKey, cfg.Capabilities, requestTTL, receiptTTL, trusted.ExecutionConfig{
+		GitHubCLIPath: cfg.GitHubCLIPath, GitHubConfigDir: cfg.GitHubConfigDir, Timeout: executionTimeout,
+	})
 	if err != nil {
 		return err
 	}
-	handler, err := trusted.NewServer(store, cfg.AllowedLogins, *dev)
+	actions := trusted.NewActionService(store)
+	handler, err := trusted.NewServerWithActionService(actions, cfg.AllowedLogins, *dev)
 	if err != nil {
 		return err
 	}
+	control, err := trusted.NewControlPlane(cfg.ControlSocket, actions)
+	if err != nil {
+		return err
+	}
+	defer control.Close()
 	listener, err := netguard.Listen(cfg.Listen, *unsafeNonLoopback)
 	if err != nil {
 		return err
@@ -125,8 +159,104 @@ func serveTrusted(args []string) error {
 	logger := log.New(os.Stderr, "airlock trusted: ", log.LstdFlags|log.LUTC)
 	syncer := trusted.NewSyncer(store, privateKey, cfg.Capabilities, cfg.RequesterURL, pollInterval, catalogTTL)
 	server := hardenedServer(handler.Handler(), logger)
-	logger.Printf("listening on %s; manual-only mode", listener.Addr())
-	return serveUntilSignal(server, listener, func(ctx context.Context) { syncer.Run(ctx, logger) })
+	// A trusted web execution may run until the validated execution deadline.
+	// Keep the connection writable through that bounded operation plus response.
+	server.WriteTimeout = executionTimeout + 10*time.Second
+	go func() {
+		if err := control.Serve(); err != nil {
+			logger.Printf("trusted control socket stopped: %v", err)
+			_ = server.Close()
+		}
+	}()
+	logger.Printf("listening on %s; local control socket %s; trusted direct execution enabled", listener.Addr(), cfg.ControlSocket)
+	return serveUntilSignal(server, listener, func(ctx context.Context) {
+		syncer.Run(ctx, logger)
+	}, func(ctx context.Context) {
+		if err := actions.Shutdown(ctx); err != nil {
+			logger.Printf("trusted execution shutdown: %v", err)
+		}
+		if err := control.Shutdown(ctx); err != nil {
+			logger.Printf("trusted control shutdown: %v", err)
+		}
+	})
+}
+
+func trustedRequestsList(args []string) error {
+	flags := flag.NewFlagSet("trusted requests list", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "trusted config path")
+	cursor := flags.String("cursor", "", "opaque next_cursor from a prior list response")
+	if err := flags.Parse(args); err != nil || *configPath == "" || flags.NArg() != 0 {
+		return errors.New("usage: airlock trusted requests list --config PATH [--cursor CURSOR]")
+	}
+	client, err := trustedControlClient(*configPath)
+	if err != nil {
+		return err
+	}
+	page, err := client.List(context.Background(), *cursor)
+	if err != nil {
+		return err
+	}
+	return printTrustedControlJSON(page)
+}
+
+func trustedRequestControl(action string, args []string) error {
+	flags := flag.NewFlagSet("trusted request "+action, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "trusted config path")
+	id := flags.String("id", "", "trusted request id")
+	if err := flags.Parse(args); err != nil || *configPath == "" || *id == "" || flags.NArg() != 0 {
+		return fmt.Errorf("usage: airlock trusted request %s --config PATH --id REQUEST_ID", action)
+	}
+	client, err := trustedControlClient(*configPath)
+	if err != nil {
+		return err
+	}
+	switch action {
+	case "show":
+		record, err := client.Show(context.Background(), *id)
+		if err != nil {
+			return err
+		}
+		return printTrustedControlJSON(record)
+	case "execute":
+		result, err := client.Execute(context.Background(), *id)
+		if err != nil {
+			return err
+		}
+		if err := printTrustedControlJSON(result); err != nil {
+			return err
+		}
+		if result.Outcome != "executed" {
+			return fmt.Errorf("trusted execution is %s; inspect the persisted attempt before a fresh explicit retry", result.Outcome)
+		}
+		return nil
+	case "deny":
+		result, err := client.Deny(context.Background(), *id)
+		if err != nil {
+			return err
+		}
+		return printTrustedControlJSON(result)
+	default:
+		return usageError()
+	}
+}
+
+func trustedControlClient(configPath string) (*trusted.ControlClient, error) {
+	cfg, err := config.LoadTrusted(configPath)
+	if err != nil {
+		return nil, err
+	}
+	return trusted.NewControlClient(cfg.ControlSocket)
+}
+
+func printTrustedControlJSON(value any) error {
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(encoded))
+	return nil
 }
 
 func createRequest(args []string) error {
@@ -217,19 +347,33 @@ func hardenedServer(handler http.Handler, logger *log.Logger) *http.Server {
 	}
 }
 
-func serveUntilSignal(server *http.Server, listener net.Listener, background func(context.Context)) error {
+func serveUntilSignal(server *http.Server, listener net.Listener, background, shutdown func(context.Context)) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if background != nil {
 		go background(ctx)
 	}
+	var shutdownOnce sync.Once
+	shutdownServer := func() {
+		shutdownOnce.Do(func() {
+			shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if shutdown != nil {
+				shutdown(shutdownContext)
+			}
+			_ = server.Shutdown(shutdownContext)
+		})
+	}
 	go func() {
 		<-ctx.Done()
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownContext)
+		shutdownServer()
 	}()
 	err := server.Serve(listener)
+	// stop also covers an unexpected Serve return: it cancels sync and makes
+	// the same ordered shutdown path cancel daemon-owned children before HTTP
+	// or local-control shutdown waits can leave one orphaned.
+	stop()
+	shutdownServer()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -237,5 +381,5 @@ func serveUntilSignal(server *http.Server, listener net.Listener, background fun
 }
 
 func usageError() error {
-	return errors.New("usage: airlock {requester serve|trusted serve|request create|keygen|mcp}")
+	return errors.New("usage: airlock {requester serve|trusted serve|trusted requests list|trusted request show|trusted request execute|trusted request deny|request create|keygen|mcp}")
 }

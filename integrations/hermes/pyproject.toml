@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-plugin-airlock"
-version = "0.2.0"
+version = "0.3.0"
 description = "Hermes tools for typed, human-reviewed Airlock authority requests"
 requires-python = ">=3.11"
 license = "MIT"

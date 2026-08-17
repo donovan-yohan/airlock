@@ -30,9 +30,9 @@ flowchart TB
   Requester -->|"returns typed request and signed catalog data"| Trusted
   Trusted -->|"checks local adapter and constraints"| Adapter
   Trusted -->|"renders a locally reconstructed action"| Review
-  Human -->|"decides and records manual outcome"| Review
+  Human -->|"approves or denies exact direct-exec plan"| Review
   Review -->|"persists trusted decision"| TrustedState
-  Human -->|"manually performs approved action"| Provider
+  Review -->|"direct exec configured gh after durable reservation"| Provider
   Trusted -->|"publishes sanitized signed receipt"| Requester
   Harness -->|"polls sanitized request state"| MCP
   Verify -->|"reads ordinary external state"| Provider

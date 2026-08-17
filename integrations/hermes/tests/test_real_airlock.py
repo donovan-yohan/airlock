@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 import urllib.request
@@ -57,8 +58,16 @@ def test_plugin_uses_real_airlock_requester(tmp_path: Path):
     keys = tmp_path / "keys"
     requester_state = tmp_path / "requester-state"
     trusted_state = tmp_path / "trusted-state"
-    for directory in (keys, requester_state, trusted_state):
+    github_config = tmp_path / "github-config"
+    for directory in (keys, requester_state, trusted_state, github_config):
         directory.mkdir(mode=0o700)
+
+    provider_marker = tmp_path / "provider-was-invoked"
+    fake_gh = tmp_path / "fake-gh"
+    fake_gh.write_text(
+        f"#!/bin/sh\ntouch -- {shlex.quote(str(provider_marker))}\nexit 99\n"
+    )
+    fake_gh.chmod(0o700)
 
     private_key = keys / "trusted.key"
     public_key = keys / "trusted.pub"
@@ -102,8 +111,12 @@ def test_plugin_uses_real_airlock_requester(tmp_path: Path):
                 {
                     "listen": "127.0.0.1:0",
                     "state_dir": str(trusted_state),
+                    "control_socket": str(trusted_state / "control.sock"),
                     "private_key_file": str(private_key),
                     "requester_url": f"http://{requester_address}",
+                    "github_cli_path": str(fake_gh),
+                    "github_config_dir": str(github_config),
+                    "execution_timeout": "10s",
                     "poll_interval": "100ms",
                     "request_max_ttl": "15m",
                     "catalog_ttl": "1h",
@@ -155,6 +168,7 @@ def test_plugin_uses_real_airlock_requester(tmp_path: Path):
         assert record["state"] == "pending"
         assert client.request_status(record["id"])["digest"] == record["digest"]
         assert client.list_requests(limit=1)[0]["id"] == record["id"]
+        assert not provider_marker.exists()
 
     private_canary = private_key.read_text().strip()
     artifacts = requester_log.read_text() + trusted_log.read_text()

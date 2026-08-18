@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,30 @@ func TestExampleConfigsRemainValid(t *testing.T) {
 	}
 	if len(trusted.Capabilities) != 1 || trusted.Capabilities[0].Adapter != model.AdapterGitHubAddCollaboratorV1 {
 		t.Fatalf("unexpected trusted capabilities: %#v", trusted.Capabilities)
+	}
+}
+
+func TestLoadTrustedAllowsNoLegacyCapabilities(t *testing.T) {
+	examplePath := filepath.Join("..", "..", "configs", "trusted.example.json")
+	trusted, err := LoadTrusted(examplePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted.Capabilities = nil
+	payload, err := json.Marshal(trusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "trusted.json")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadTrusted(path)
+	if err != nil {
+		t.Fatalf("current command profile must not require a legacy adapter: %v", err)
+	}
+	if len(loaded.Capabilities) != 0 {
+		t.Fatalf("unexpected legacy capabilities: %#v", loaded.Capabilities)
 	}
 }
 
@@ -99,6 +124,14 @@ func TestConfigRejectsUnknownFieldsAndURLCredentials(t *testing.T) {
 	}
 	if _, err := LoadRequester(unknownPath); err == nil {
 		t.Fatal("unknown config field accepted")
+	}
+	duplicatePath := filepath.Join(dir, "duplicate.json")
+	duplicate := []byte(`{"listen":"127.0.0.1:1","listen":"127.0.0.1:2","state_dir":"state","trusted_public_key_file":"trusted.pub"}`)
+	if err := os.WriteFile(duplicatePath, duplicate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadRequester(duplicatePath); err == nil {
+		t.Fatal("duplicate config field accepted")
 	}
 	if err := validateRequesterURL("https://user@example.invalid"); err == nil {
 		t.Fatal("requester URL credentials accepted")
@@ -179,6 +212,14 @@ func TestTrustedExecutionConfigIsStrictAndResolvesIsolatedDirectory(t *testing.T
 		{`"control_socket": "../../.local/state/airlock/trusted/control.sock"`, `"control_socket": "../../.local/state/airlock/trusted/nested/control.sock"`},
 		{`"github_cli_path": "/usr/bin/gh"`, `"github_cli_path": "/` + strings.Repeat("x", maxTrustedPathBytes) + `"`},
 		{`"github_cli_path": "/usr/bin/gh"`, `"github_cli_path": "/usr/bin/\u0001gh"`},
+		{`"github_cli_path": "/usr/bin/gh"`, `"github_cli_path": "/usr/bin/\u200bgh"`},
+		{`"sandbox_cli_path": "/usr/bin/bwrap"`, `"sandbox_cli_path": "/usr/bin/\ufdd0bwrap"`},
+		{`"profile_config_version": "example-2026-08"`, `"profile_config_version": "changed without spaces"`},
+		{`"credential_authority_label": "Broad GitHub credential authority"`, `"credential_authority_label": "\u001b[31mbroad"`},
+		{`"sandbox_label": "Linux bubblewrap namespaces with an ephemeral private GitHub config and working directory"`, `"sandbox_label": "safe\u202emislabeled"`},
+		{`"network_label": "Outbound network available to the approved GitHub CLI process"`, `"network_label": "safe\u200bnetwork"`},
+		{`"cwd_label": "Fresh private per-invocation directory"`, `"cwd_label": "safe\ufdd0directory"`},
+		{`"output_label": "Bounded sanitized stdout and stderr preview for trusted reviewers only; no requester egress"`, `"output_label": ""`},
 	} {
 		contents := bytes.Replace(example, []byte(replacement.old), []byte(replacement.new), 1)
 		if err := os.WriteFile(path, contents, 0o600); err != nil {

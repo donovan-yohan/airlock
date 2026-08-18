@@ -145,7 +145,7 @@ func (s *Server) requestRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) review(w http.ResponseWriter, _ *http.Request, reviewer, id string) {
-	record, command, found := s.service.Record(id)
+	record, plan, found := s.service.Record(id)
 	if !found {
 		http.Error(w, "request not found", http.StatusNotFound)
 		return
@@ -156,48 +156,69 @@ func (s *Server) review(w http.ResponseWriter, _ *http.Request, reviewer, id str
 	_ = trustedReviewPage.Execute(w, struct {
 		Reviewer string
 		Record   Record
+		Plan     *ExecutionPlan
 		Command  string
+		Warnings []string
 		CSRF     string
-	}{reviewer, record, command, s.csrf})
+	}{reviewer, record, plan, func() string {
+		if plan == nil {
+			return ""
+		}
+		return escapedCommand(*plan)
+	}(), func() []string {
+		if plan == nil {
+			return nil
+		}
+		return classifyGitHubRisk(plan.Argv)
+	}(), s.csrf})
 }
 
-func (s *Server) validateTrustedForm(w http.ResponseWriter, r *http.Request) bool {
+func (s *Server) validateTrustedForm(w http.ResponseWriter, r *http.Request, requirePlan, requireFullAuthority bool) (string, bool) {
 	if r.URL.RawQuery != "" {
 		http.Error(w, "query parameters are not allowed", http.StatusBadRequest)
-		return false
+		return "", false
 	}
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/x-www-form-urlencoded" {
 		http.Error(w, "form content type required", http.StatusUnsupportedMediaType)
-		return false
+		return "", false
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
-		return false
+		return "", false
 	}
 	for key, values := range r.PostForm {
-		if key != "csrf_token" || len(values) != 1 {
+		if (key != "csrf_token" && key != "plan_digest" && key != "confirm_full_authority") || len(values) != 1 {
 			http.Error(w, "invalid form fields", http.StatusBadRequest)
-			return false
+			return "", false
 		}
 	}
-	if len(r.PostForm) != 1 || !s.validCSRF(r, r.PostForm.Get("csrf_token")) {
+	expectedFields := 1
+	if requirePlan {
+		expectedFields = 2
+	}
+	if requireFullAuthority {
+		expectedFields++
+	}
+	planDigest := r.PostForm.Get("plan_digest")
+	if len(r.PostForm) != expectedFields || (requirePlan && len(planDigest) != 64) || (requireFullAuthority && r.PostForm.Get("confirm_full_authority") != "true") || !s.validCSRF(r, r.PostForm.Get("csrf_token")) {
 		http.Error(w, "CSRF validation failed", http.StatusForbidden)
-		return false
+		return "", false
 	}
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
 		http.Error(w, "cross-site form refused", http.StatusForbidden)
-		return false
+		return "", false
 	}
-	return true
+	return planDigest, true
 }
 
 func (s *Server) execute(w http.ResponseWriter, r *http.Request, reviewer, id string) {
-	if !s.validateTrustedForm(w, r) {
+	planDigest, ok := s.validateTrustedForm(w, r, true, true)
+	if !ok {
 		return
 	}
-	if err := s.service.Execute(r.Context(), id, reviewer); err != nil {
+	if err := s.service.Execute(r.Context(), id, reviewer, planDigest, true); err != nil {
 		// Errors can originate in a local child process. Keep those details out
 		// of the UI; the bounded stored status is the reviewer-facing evidence.
 		http.Error(w, "trusted execution was not completed; inspect the bounded attempt status before an explicit retry", http.StatusUnprocessableEntity)
@@ -207,7 +228,7 @@ func (s *Server) execute(w http.ResponseWriter, r *http.Request, reviewer, id st
 }
 
 func (s *Server) deny(w http.ResponseWriter, r *http.Request, reviewer, id string) {
-	if !s.validateTrustedForm(w, r) {
+	if _, ok := s.validateTrustedForm(w, r, false, false); !ok {
 		return
 	}
 	if err := s.service.Deny(id, reviewer); err != nil {
@@ -276,12 +297,12 @@ func trustedMethodNotAllowed(w http.ResponseWriter, methods ...string) {
 var trustedHomePage = template.Must(template.New("home").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Airlock trusted review</title><style>
 body{font:16px system-ui,sans-serif;max-width:72rem;margin:2rem auto;padding:0 1rem;color:#18212f;background:#f7f8fa}article{background:white;border:1px solid #ccd5df;border-radius:.6rem;padding:1rem;margin:1rem 0}code{overflow-wrap:anywhere}.state{font-weight:700}.muted{color:#536273}a{color:#064f9e}
-</style></head><body><h1>Airlock trusted review</h1><p>Signed in as <strong>{{.Reviewer}}</strong>.</p><p class="muted">Airlock validates a typed request, persists a reviewer-approved execution attempt, then directly executes its locally reconstructed argv. Pages contain at most {{.PageSize}} requests.</p>{{if .Records}}{{range .Records}}<article><p class="state">{{.State}}</p><p><code>{{.Request.ID}}</code></p><p>{{.Request.Action}} on {{index .Request.Arguments "repository"}}</p><a href="/requests/{{.Request.ID}}">Review exact request</a></article>{{end}}{{else}}<p>No requests have been pulled.</p>{{end}}{{if .NextCursor}}<p><a href="/?cursor={{.NextCursor}}">Older requests →</a></p>{{end}}</body></html>`))
+</style></head><body><h1>Airlock trusted review</h1><p>Signed in as <strong>{{.Reviewer}}</strong>.</p><p class="muted">Airlock validates a command proposal, persists a reviewer-approved exact resolved plan, then directly executes its argv without shell parsing. Pages contain at most {{.PageSize}} requests.</p>{{if .Records}}{{range .Records}}<article><p class="state">{{.State}}</p><p><code>{{.Request.ID}}</code></p>{{if .Request.ProfileID}}<p><code>{{.Request.ProfileID}}/{{.Request.ProfileVersion}}</code> — {{len .Request.Argv}} argv elements</p>{{else}}<p>Historical <code>{{.Request.Action}}</code> request</p>{{end}}<a href="/requests/{{.Request.ID}}">Review exact request</a></article>{{end}}{{else}}<p>No requests have been pulled.</p>{{end}}{{if .NextCursor}}<p><a href="/?cursor={{.NextCursor}}">Older requests →</a></p>{{end}}</body></html>`))
 
 var trustedReviewPage = template.Must(template.New("review").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Airlock request review</title><style>
 body{font:16px system-ui,sans-serif;max-width:72rem;margin:2rem auto;padding:0 1rem;color:#18212f;background:#f7f8fa}section{background:white;border:1px solid #ccd5df;border-radius:.6rem;padding:1rem;margin:1rem 0}code,pre{overflow-wrap:anywhere;white-space:pre-wrap}dt{font-weight:700;margin-top:.8rem}button{padding:.6rem .9rem;margin:.4rem .4rem .4rem 0}textarea{display:block;width:100%;max-width:50rem}.warning{background:#fff4d6;border-color:#d59b22}
-</style></head><body><p><a href="/">← All requests</a></p><h1>Trusted request review</h1><section><dl><dt>State</dt><dd>{{.Record.State}}</dd><dt>Request ID</dt><dd><code>{{.Record.Request.ID}}</code></dd><dt>Exact digest</dt><dd><code>{{.Record.Request.Digest}}</code></dd><dt>Action</dt><dd><code>{{.Record.Request.Action}}</code></dd><dt>Arguments</dt><dd>repository=<code>{{index .Record.Request.Arguments "repository"}}</code><br>permission=<code>{{index .Record.Request.Arguments "permission"}}</code></dd><dt>Reason</dt><dd>{{.Record.Request.Reason}}</dd><dt>Created</dt><dd>{{.Record.Request.CreatedAt}}</dd><dt>Expires</dt><dd>{{.Record.Request.ExpiresAt}}</dd></dl></section>
-<section class="warning"><h2>Locally reconstructed action</h2><p>For an execution attempt, Airlock passes this configured executable and exact argv directly to the local process. It is not a shell or requester action.</p>{{if .Command}}<pre>{{.Command}}</pre>{{else}}<p>Request is not renderable by the installed adapter.</p>{{end}}</section>
-{{if eq .Record.State "pending"}}<form method="post" action="/requests/{{.Record.Request.ID}}/execute"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button>Approve and execute</button></form><form method="post" action="/requests/{{.Record.Request.ID}}/deny"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button>Deny</button></form>{{else if or (eq .Record.State "failed") (eq .Record.State "uncertain")}}<form method="post" action="/requests/{{.Record.Request.ID}}/execute"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button>Retry execution</button></form>{{else if eq .Record.State "running"}}<p class="warning">An execution attempt is running. Refresh for its bounded result; no concurrent attempt can start.</p>{{else if eq .Record.State "executed"}}<p class="warning"><strong>Local execution succeeded; this does not prove GitHub state.</strong> Verify the intended effect through an independent read-only provider check.</p>{{end}}
-{{if .Record.Attempts}}<section><h2>Bounded local execution attempts</h2>{{range .Record.Attempts}}<p><strong>{{.Status}}</strong> — {{.ID}} — started {{.StartedAt}}{{if .FinishedAt}}, finished {{.FinishedAt}}{{end}}{{if .FailureCode}}, code {{.FailureCode}}{{end}}</p>{{end}}</section>{{end}}{{if .Record.Receipts}}<section><h2>Signed receipts</h2>{{range .Record.Receipts}}<p><strong>{{.Receipt.Decision}}</strong> by {{.Receipt.Reviewer}} at {{.Receipt.CreatedAt}} — delivered: {{.Delivered}}</p>{{end}}</section>{{end}}</body></html>`))
+</style></head><body><p><a href="/">← All requests</a></p><h1>Trusted request review</h1><section><dl><dt>State</dt><dd>{{.Record.State}}</dd><dt>Request ID</dt><dd><code>{{.Record.Request.ID}}</code></dd><dt>Exact request digest</dt><dd><code>{{.Record.Request.Digest}}</code></dd>{{if .Record.Request.ProfileID}}<dt>Proposed profile</dt><dd><code>{{.Record.Request.ProfileID}}/{{.Record.Request.ProfileVersion}}</code></dd>{{else}}<dt>Historical action</dt><dd><code>{{.Record.Request.Action}}</code></dd>{{end}}<dt>Reason</dt><dd>{{.Record.Request.Reason}}</dd><dt>Created</dt><dd>{{.Record.Request.CreatedAt}}</dd><dt>Expires</dt><dd>{{.Record.Request.ExpiresAt}}</dd></dl></section>
+<section class="warning"><h2>Resolved immutable plan</h2>{{if .Plan}}<dl><dt>Profile</dt><dd><code>{{.Plan.ProfileID}}/{{.Plan.ProfileVersion}}</code></dd><dt>Authority</dt><dd>{{.Plan.CredentialAuthority}}</dd><dt>Request digest</dt><dd><code>{{.Plan.RequestDigest}}</code></dd><dt>Resolved plan digest</dt><dd><code>{{.Plan.Digest}}</code></dd><dt>Executable path</dt><dd><code>{{.Plan.Executable}}</code></dd><dt>Executable SHA-256 identity</dt><dd><code>{{.Plan.ExecutableSHA256}}</code></dd><dt>Credential snapshot identity</dt><dd><code>{{.Plan.CredentialSourceID}}</code></dd><dt>Sandbox launcher path</dt><dd><code>{{.Plan.SandboxLauncher}}</code></dd><dt>Sandbox launcher SHA-256 identity</dt><dd><code>{{.Plan.SandboxLauncherSHA256}}</code></dd><dt>Execution identity</dt><dd>{{.Plan.ExecutionIdentity}}</dd><dt>Sandbox</dt><dd>{{.Plan.SandboxPolicy}}</dd><dt>Network</dt><dd>{{.Plan.NetworkPolicy}}</dd><dt>Working directory</dt><dd>{{.Plan.WorkingDirectoryPolicy}}</dd><dt>Environment policy</dt><dd><ul>{{range .Plan.EnvironmentPolicy}}<li><code>{{.}}</code></li>{{end}}</ul></dd><dt>Timeout</dt><dd>{{.Plan.TimeoutMilliseconds}} ms</dd><dt>Output</dt><dd>{{.Plan.OutputPolicy}}</dd><dt>Profile config version</dt><dd><code>{{.Plan.ProfileConfigVersion}}</code></dd></dl><h3>Exact argv elements</h3><ol start="0">{{range $index, $argument := .Plan.Argv}}<li><code>argv[{{$index}}] = {{$argument}}</code></li>{{end}}</ol><p>Non-executable escaped convenience rendering:</p><pre>{{.Command}}</pre><h3>Reviewer-assistance warnings</h3><ul>{{range .Warnings}}<li>{{.}}</li>{{end}}</ul>{{else}}<p>Request is not renderable by the installed profile. Execution is unavailable.</p>{{end}}</section>
+{{if and .Plan (eq .Record.State "pending")}}<form method="post" action="/requests/{{.Record.Request.ID}}/execute"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="plan_digest" value="{{.Plan.Digest}}"><p class="warning"><label><input type="checkbox" name="confirm_full_authority" value="true"> I confirm this exact plan grants full configured GitHub authority and may have high impact.</label></p><button>Approve exact plan and execute</button></form><form method="post" action="/requests/{{.Record.Request.ID}}/deny"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button>Deny and require resubmission</button></form>{{else if and .Plan (or (eq .Record.State "failed") (eq .Record.State "uncertain"))}}<form method="post" action="/requests/{{.Record.Request.ID}}/execute"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="plan_digest" value="{{.Plan.Digest}}"><p class="warning"><label><input type="checkbox" name="confirm_full_authority" value="true"> I confirm this exact retry grants full configured GitHub authority and may have high impact.</label></p><button>Approve exact plan and retry</button></form>{{else if eq .Record.State "running"}}<p class="warning">An execution attempt is running. Refresh for its bounded result; no concurrent attempt can start.</p>{{else if eq .Record.State "executed"}}<p class="warning"><strong>Local execution succeeded; this does not prove GitHub state.</strong> Verify the intended effect through an independent read-only provider check.</p>{{end}}
+{{if .Record.Attempts}}<section><h2>Bounded local execution attempts</h2>{{range .Record.Attempts}}<p><strong>{{.Status}}</strong> — {{.ID}} — started {{.StartedAt}}{{if .FinishedAt}}, finished {{.FinishedAt}}{{end}}{{if .FailureCode}}, code {{.FailureCode}}{{end}}</p>{{if .Plan}}<section><h3>Immutable plan approved for this attempt</h3><dl><dt>Plan digest</dt><dd><code>{{.Plan.Digest}}</code></dd><dt>Executable</dt><dd><code>{{.Plan.Executable}}</code></dd><dt>Executable SHA-256</dt><dd><code>{{.Plan.ExecutableSHA256}}</code></dd><dt>Credential snapshot identity</dt><dd><code>{{.Plan.CredentialSourceID}}</code></dd><dt>Sandbox launcher</dt><dd><code>{{.Plan.SandboxLauncher}}</code></dd><dt>Sandbox launcher SHA-256</dt><dd><code>{{.Plan.SandboxLauncherSHA256}}</code></dd><dt>Environment policy</dt><dd><ul>{{range .Plan.EnvironmentPolicy}}<li><code>{{.}}</code></li>{{end}}</ul></dd><dt>Timeout</dt><dd>{{.Plan.TimeoutMilliseconds}} ms</dd><dt>Output</dt><dd>{{.Plan.OutputPolicy}}</dd><dt>Profile config version</dt><dd><code>{{.Plan.ProfileConfigVersion}}</code></dd></dl><h4>Exact argv elements</h4><ol start="0">{{range $index, $argument := .Plan.Argv}}<li><code>argv[{{$index}}] = {{$argument}}</code></li>{{end}}</ol></section>{{end}}{{if .OutputPreview}}<section class="warning"><h3>Trusted-local captured output</h3><p>Visible only to this trusted reviewer surface; sanitized before storage{{if .OutputPreview.Redacted}}; credential-like text redacted{{end}}{{if .OutputPreview.StdoutTruncated}}; stdout truncated{{end}}{{if .OutputPreview.StderrTruncated}}; stderr truncated{{end}}.</p>{{if .OutputPreview.Stdout}}<h4>stdout</h4><pre>{{.OutputPreview.Stdout}}</pre>{{end}}{{if .OutputPreview.Stderr}}<h4>stderr</h4><pre>{{.OutputPreview.Stderr}}</pre>{{end}}</section>{{end}}{{end}}</section>{{end}}{{if .Record.Receipts}}<section><h2>Signed receipts</h2>{{range .Record.Receipts}}<p><strong>{{.Receipt.Decision}}</strong> by {{.Receipt.Reviewer}} at {{.Receipt.CreatedAt}} — delivered: {{.Delivered}}</p>{{end}}</section>{{end}}</body></html>`))

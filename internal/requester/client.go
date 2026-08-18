@@ -3,7 +3,6 @@ package requester
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/donovan-yohan/airlock/internal/httpjson"
+	"github.com/donovan-yohan/airlock/internal/jsonstrict"
 	"github.com/donovan-yohan/airlock/internal/model"
 	"github.com/donovan-yohan/airlock/internal/netguard"
 	"github.com/donovan-yohan/airlock/internal/paging"
@@ -143,7 +144,7 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, des
 }
 
 func (c *Client) postJSON(ctx context.Context, path string, value any, expectedStatus int, destination any) error {
-	body, err := json.Marshal(value)
+	body, err := httpjson.Marshal(value)
 	if err != nil {
 		return ErrInvalidData
 	}
@@ -176,12 +177,7 @@ func (c *Client) doJSON(request *http.Request, expectedStatus int, destination a
 		}
 		return ErrInvalidData
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		return ErrInvalidData
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if err := jsonstrict.DecodeOne(body, destination); err != nil {
 		return ErrInvalidData
 	}
 	return nil
@@ -191,7 +187,7 @@ func rejectedError(body []byte) error {
 	var payload struct {
 		Error string `json:"error"`
 	}
-	if json.Unmarshal(body, &payload) != nil || payload.Error == "" || len(payload.Error) > 300 || !utf8.ValidString(payload.Error) {
+	if jsonstrict.DecodeOne(body, &payload) != nil || payload.Error == "" || len(payload.Error) > 300 || !utf8.ValidString(payload.Error) {
 		return ErrRejected
 	}
 	for _, character := range payload.Error {
@@ -203,6 +199,9 @@ func rejectedError(body []byte) error {
 }
 
 func validateRecord(record Record, now time.Time) error {
+	if len(record.Receipts) > maxRequesterReceipts {
+		return errors.New("receipt history exceeds the protocol limit")
+	}
 	created, createdErr := time.Parse(time.RFC3339, record.Request.CreatedAt)
 	expires, expiresErr := time.Parse(time.RFC3339, record.Request.ExpiresAt)
 	if createdErr != nil || expiresErr != nil || created.After(now.Add(model.ClockSkew)) || model.ValidateRequest(record.Request, expires.Add(-time.Second), time.Hour) != nil {
@@ -211,12 +210,21 @@ func validateRecord(record Record, now time.Time) error {
 	state := "pending"
 	var previousReceiptCreated time.Time
 	var transitionErr error
-	for _, receipt := range record.Receipts {
+	seenReceiptIDs := make(map[string]struct{}, len(record.Receipts))
+	seenReceiptSignatures := make(map[string]struct{}, len(record.Receipts))
+	for receiptIndex, receipt := range record.Receipts {
 		receiptCreated, createdErr := time.Parse(time.RFC3339, receipt.CreatedAt)
 		receiptExpires, expiresErr := time.Parse(time.RFC3339, receipt.ExpiresAt)
-		if createdErr != nil || expiresErr != nil || receiptCreated.After(now.Add(model.ClockSkew)) || receiptCreated.Before(created) || !receiptCreated.Before(expires) || (!previousReceiptCreated.IsZero() && receiptCreated.Before(previousReceiptCreated)) || model.ValidateReceipt(receipt, receiptExpires.Add(-time.Second), 7*24*time.Hour) != nil || receipt.RequestID != record.Request.ID || receipt.RequestDigest != record.Request.Digest {
+		_, duplicateID := seenReceiptIDs[receipt.ID]
+		_, duplicateSignature := seenReceiptSignatures[receipt.Signature]
+		if createdErr != nil || expiresErr != nil || receiptCreated.After(now.Add(model.ClockSkew)) || receiptCreated.Before(created) || !receiptCreated.Before(expires) || (!previousReceiptCreated.IsZero() && receiptCreated.Before(previousReceiptCreated)) || model.ValidateReceipt(receipt, receiptExpires.Add(-time.Second), 7*24*time.Hour) != nil || receipt.RequestID != record.Request.ID || receipt.RequestDigest != record.Request.Digest || !receiptProtocolMatchesRequest(record.Request, receipt) || duplicateID || duplicateSignature {
 			return errors.New("invalid receipt record")
 		}
+		if receipt.Version == model.ReceiptVersion && receipt.Decision == model.DecisionExecuted && (receiptIndex == 0 || !sameCurrentPlan(record.Receipts[receiptIndex-1], receipt)) {
+			return errors.New("invalid execution receipt plan")
+		}
+		seenReceiptIDs[receipt.ID] = struct{}{}
+		seenReceiptSignatures[receipt.Signature] = struct{}{}
 		previousReceiptCreated = receiptCreated
 		state, transitionErr = model.NextRequestState(state, receipt.Decision)
 		if transitionErr != nil {

@@ -11,9 +11,8 @@ import (
 func TestRequestDigestDeterministicAndMutationBound(t *testing.T) {
 	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
 	first := validRequest(now)
-	first.Arguments = map[string]string{"repository": "project", "permission": "push"}
 	second := first
-	second.Arguments = map[string]string{"permission": "push", "repository": "project"}
+	second.Argv = append([]string(nil), first.Argv...)
 	if err := SetRequestDigest(&first); err != nil {
 		t.Fatal(err)
 	}
@@ -21,7 +20,7 @@ func TestRequestDigestDeterministicAndMutationBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	if first.Digest != second.Digest {
-		t.Fatalf("map insertion order changed digest: %s != %s", first.Digest, second.Digest)
+		t.Fatalf("equivalent argv changed digest: %s != %s", first.Digest, second.Digest)
 	}
 	second.Reason = "mutated after display"
 	if err := VerifyRequestDigest(second); err == nil {
@@ -125,6 +124,25 @@ func TestExpiredObjectsFailClosed(t *testing.T) {
 	}
 }
 
+func TestPersistedEnvelopeValidationRetainsExpiredProtocolHistory(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	catalog := validCatalog(now.Add(-2 * time.Hour))
+	if err := ValidatePersistedCatalog(catalog); err != nil {
+		t.Fatalf("expired catalog is valid durable history: %v", err)
+	}
+	request := validRequest(now.Add(-2 * time.Hour))
+	if err := SetRequestDigest(&request); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePersistedRequest(request); err != nil {
+		t.Fatalf("expired request is valid durable history: %v", err)
+	}
+	receipt := validReceipt(now.Add(-2*time.Hour), request)
+	if err := ValidatePersistedReceipt(receipt); err != nil {
+		t.Fatalf("expired receipt is valid durable history: %v", err)
+	}
+}
+
 func TestReceiptEvidenceIsDeferredFailClosed(t *testing.T) {
 	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
 	request := validRequest(now)
@@ -167,7 +185,7 @@ func TestReceiptVersionsBindDecisionFamilies(t *testing.T) {
 	if err := SetRequestDigest(&request); err != nil {
 		t.Fatal(err)
 	}
-	v2 := Receipt{Version: ReceiptVersion, ID: "rec_0123456789abcdefghij", RequestID: request.ID, RequestDigest: request.Digest, Decision: DecisionApproveForExecution, Reviewer: "reviewer@example.invalid", AdapterVersion: AdapterGitHubAddCollaboratorV1, CreatedAt: Timestamp(now), ExpiresAt: Timestamp(now.Add(time.Hour))}
+	v2 := Receipt{Version: ReceiptVersionV2, ID: "rec_0123456789abcdefghij", RequestID: request.ID, RequestDigest: request.Digest, Decision: DecisionApproveForExecution, Reviewer: "reviewer@example.invalid", AdapterVersion: AdapterGitHubAddCollaboratorV1, CreatedAt: Timestamp(now), ExpiresAt: Timestamp(now.Add(time.Hour))}
 	if err := ValidateReceipt(v2, now, time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -180,11 +198,16 @@ func TestReceiptVersionsBindDecisionFamilies(t *testing.T) {
 	if err := ValidateReceipt(v2, now, time.Hour); err == nil {
 		t.Fatal("v1 accepted execution-only decision")
 	}
+	v3 := Receipt{Version: ReceiptVersion, ID: "rec_0123456789abcdefghij", RequestID: request.ID, RequestDigest: request.Digest, Decision: DecisionApproveForExecution, Reviewer: "reviewer@example.invalid", ProfileID: ProfileGitHubCommandID, ProfileVersion: ProfileGitHubCommandVersion, PlanDigest: strings.Repeat("a", 64), CreatedAt: Timestamp(now), ExpiresAt: Timestamp(now.Add(time.Hour))}
+	if err := ValidateReceipt(v3, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func validCatalog(now time.Time) Catalog {
 	return Catalog{
 		Version: CatalogVersion, IssuedAt: Timestamp(now), ExpiresAt: Timestamp(now.Add(time.Hour)),
+		Profiles: []CommandProfile{{ID: ProfileGitHubCommandID, Version: ProfileGitHubCommandVersion, DisplayName: "GitHub CLI command", AuthorityLabel: "Broad GitHub authority", SandboxLabel: "Ephemeral local state", NetworkLabel: "GitHub network", CWDLabel: "Ephemeral directory", OutputLabel: "Bounded sanitized trusted-local output preview", Limits: ProfileLimits{MaxArgvCount: MaxArgvCount, MaxArgumentBytes: MaxArgumentBytes, MaxAggregateBytes: MaxArgvAggregateBytes}}},
 		Capabilities: []Capability{{
 			ID: "github:example-owner", DisplayName: "Example GitHub authority",
 			Actions:     []string{ActionGitHubAddCollaborator},
@@ -195,8 +218,8 @@ func validCatalog(now time.Time) Catalog {
 
 func validRequest(now time.Time) Request {
 	return Request{
-		Version: RequestVersion, ID: "req_0123456789abcdefghij", CapabilityID: "github:example-owner", // pragma: allowlist secret
-		Action: ActionGitHubAddCollaborator, Arguments: map[string]string{"repository": "project", "permission": "push"},
+		Version: RequestVersion, ID: "req_0123456789abcdefghij", ProfileID: ProfileGitHubCommandID, ProfileVersion: ProfileGitHubCommandVersion,
+		Argv:   []string{"api", "repos/example-owner/project"},
 		Reason: "Allow a bounded contribution", CreatedAt: Timestamp(now), ExpiresAt: Timestamp(now.Add(time.Hour)),
 		Nonce: "0123456789abcdefghijklmnopqrstuv",
 	}

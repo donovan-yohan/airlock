@@ -8,6 +8,7 @@ import ipaddress
 import json
 import math
 import re
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,26 +21,55 @@ _MAX_REQUEST_BYTES = 64 << 10
 _MAX_ERROR_CHARS = 300
 _MAX_LIST_PAGES = 100
 _MAX_PAGE_LIMIT = 50
-_CAPABILITY_RE = re.compile(r"^[a-z0-9][a-z0-9:._-]{0,127}$")
 _REQUEST_ID_RE = re.compile(r"^req_[A-Za-z0-9_-]{20,80}$")
 _PAGE_CURSOR_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _RECEIPT_ID_RE = re.compile(r"^rec_[A-Za-z0-9_-]{20,80}$")
 _DIGEST_RE = re.compile(r"^[a-f0-9]{64}$")
-_GITHUB_USER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
-_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$")
 _RFC3339_RE = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
     r"(?P<fraction>\.\d+)?(?P<zone>Z|[+-]\d{2}:\d{2})$"
 )
 _ALLOWED_STATES = {
-    "pending", "approved", "approved_for_execution", "denied", "manually_executed", "executed"
+    "pending",
+    "approved",
+    "approved_for_execution",
+    "denied",
+    "manually_executed",
+    "executed",
 }
 _RECEIPT_DECISIONS = {
-    "airlock.receipt/v1": frozenset({"approved_for_manual_execution", "denied", "manually_executed"}),
+    "airlock.receipt/v1": frozenset(
+        {"approved_for_manual_execution", "denied", "manually_executed"}
+    ),
     "airlock.receipt/v2": frozenset({"approved_for_execution", "denied", "executed"}),
+    "airlock.receipt/v3": frozenset({"approved_for_execution", "denied", "executed"}),
 }
-_ALLOWED_ACTION = "github.repo.add_collaborator"
+_PROFILE_ID = "github.command"
+_PROFILE_VERSION = "v1"
 _ADAPTER_VERSION = "github.repo.add_collaborator/v1"
+_LIKELY_CREDENTIAL_PATTERNS = (
+    re.compile(
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[A-Z0-9+/=\r\n-]*-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{20,}\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{8,}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b[a-z][a-z0-9+.-]*://[^/\s@]+@", re.IGNORECASE),
+    re.compile(
+        r"\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|password|secret)\s*[:=]\s*\S{8,}",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b[A-Za-z0-9_-]{80,}\b"),
+)
 
 
 @dataclass
@@ -60,7 +90,9 @@ class AirlockError(Exception):
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise AirlockError("redirect_refused", "Airlock requester redirects are refused", code)
+        raise AirlockError(
+            "redirect_refused", "Airlock requester redirects are refused", code
+        )
 
 
 class AirlockClient:
@@ -71,68 +103,81 @@ class AirlockClient:
         try:
             timeout = float(timeout_seconds)
         except (TypeError, ValueError) as exc:
-            raise AirlockError("invalid_config", "timeout_seconds must be numeric") from exc
+            raise AirlockError(
+                "invalid_config", "timeout_seconds must be numeric"
+            ) from exc
         if not math.isfinite(timeout):
             raise AirlockError("invalid_config", "timeout_seconds must be finite")
         self.timeout_seconds = min(30.0, max(0.25, timeout))
         # Never let HTTP_PROXY/HTTPS_PROXY route loopback authority requests elsewhere.
-        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _NoRedirect()
+        )
 
     def capabilities(self) -> dict[str, Any]:
         raw = self._request("/api/v1/catalog")
-        capabilities = raw.get("capabilities")
-        if raw.get("version") != "airlock.catalog/v1" or not isinstance(capabilities, list):
-            raise AirlockError("invalid_response", "Requester returned an unsupported catalog")
-        if not 1 <= len(capabilities) <= 64:
-            raise AirlockError("invalid_response", "Requester returned an invalid capability count")
+        profiles = raw.get("profiles")
+        if raw.get("version") != "airlock.catalog/v2" or not isinstance(profiles, list):
+            raise AirlockError(
+                "invalid_response", "Requester returned an unsupported catalog"
+            )
+        if not 1 <= len(profiles) <= 16:
+            raise AirlockError(
+                "invalid_response", "Requester returned an invalid profile count"
+            )
         issued_at = _response_string(raw.get("issued_at"), "issued_at", 40)
         expires_at = _response_string(raw.get("expires_at"), "expires_at", 40)
         return {
             "version": raw.get("version"),
             "issued_at": issued_at,
             "expires_at": expires_at,
-            "expired": _expired_window(issued_at, expires_at, "issued_at", "expires_at"),
-            "capabilities": [_sanitize_capability(item) for item in capabilities],
+            "expired": _expired_window(
+                issued_at, expires_at, "issued_at", "expires_at"
+            ),
+            "profiles": [_sanitize_profile(item) for item in profiles],
         }
 
     def create_request(
         self,
         *,
-        capability_id: Any,
-        action: Any,
-        repository: Any,
-        permission: Any,
+        profile_id: Any,
+        profile_version: Any,
+        argv: Any,
         reason: Any,
         ttl_seconds: Any,
     ) -> dict[str, Any]:
-        capability_id = _validated_string(capability_id, "capability_id", 128)
-        if not _CAPABILITY_RE.fullmatch(capability_id):
-            raise AirlockError("invalid_input", "capability_id has an invalid format")
-        action = _validated_string(action, "action", 128)
-        if action != _ALLOWED_ACTION:
-            raise AirlockError("invalid_input", "action is not supported by this plugin version")
-        repository = _validated_string(repository, "repository", 100)
-        if (
-            not _REPOSITORY_RE.fullmatch(repository)
-            or repository in {".", ".."}
-            or ".." in repository
-        ):
-            raise AirlockError("invalid_input", "repository must be one conservative GitHub name")
-        permission = _validated_string(permission, "permission", 8)
-        if permission not in {"pull", "push"}:
-            raise AirlockError("invalid_input", "permission must be pull or push")
-        reason = _validated_string(reason, "reason", 512)
+        profile_id = _validated_string(profile_id, "profile_id", 64)
+        profile_version = _validated_string(profile_version, "profile_version", 8)
+        if profile_id != _PROFILE_ID or profile_version != _PROFILE_VERSION:
+            raise AirlockError(
+                "invalid_input", "profile is not supported by this plugin version"
+            )
+        if not isinstance(argv, list) or not 1 <= len(argv) <= 64:
+            raise AirlockError(
+                "invalid_input", "argv must contain between 1 and 64 elements"
+            )
+        argv = [
+            _validated_command_string(item, f"argv[{index}]", 4096)
+            for index, item in enumerate(argv)
+        ]
+        if sum(_utf8_length(item) for item in argv) > 32768:
+            raise AirlockError("invalid_input", "argv aggregate bytes exceed 32768")
+        reason = _validated_command_string(reason, "reason", 512)
+        if not reason.strip():
+            raise AirlockError("invalid_input", "reason must not be blank")
         if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
             raise AirlockError("invalid_input", "ttl_seconds must be an integer")
         if not 60 <= ttl_seconds <= 3600:
-            raise AirlockError("invalid_input", "ttl_seconds must be between 60 and 3600")
+            raise AirlockError(
+                "invalid_input", "ttl_seconds must be between 60 and 3600"
+            )
         raw = self._request(
             "/api/v1/requests",
             method="POST",
             payload={
-                "capability_id": capability_id,
-                "action": action,
-                "arguments": {"repository": repository, "permission": permission},
+                "profile_id": profile_id,
+                "profile_version": profile_version,
+                "argv": argv,
                 "reason": reason,
                 "ttl_seconds": ttl_seconds,
             },
@@ -146,14 +191,21 @@ class AirlockClient:
         quoted = urllib.parse.quote(request_id, safe="")
         return _sanitize_record(self._request(f"/api/v1/requests/{quoted}"))
 
-    def list_requests(self, *, state: Any = None, limit: Any = 10) -> list[dict[str, Any]]:
+    def list_requests(
+        self, *, state: Any = None, limit: Any = 10
+    ) -> list[dict[str, Any]]:
         if state is not None:
             state = _validated_string(state, "state", 32)
             if state not in _ALLOWED_STATES:
                 raise AirlockError("invalid_input", "state filter is invalid")
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _MAX_PAGE_LIMIT:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= _MAX_PAGE_LIMIT
+        ):
             raise AirlockError(
-                "invalid_input", f"limit must be an integer between 1 and {_MAX_PAGE_LIMIT}"
+                "invalid_input",
+                f"limit must be an integer between 1 and {_MAX_PAGE_LIMIT}",
             )
         result: list[dict[str, Any]] = []
         cursor = ""
@@ -167,7 +219,9 @@ class AirlockClient:
             raw = self._request("/api/v1/requests", limit=page_limit, cursor=cursor)
             records = raw.get("requests")
             if not isinstance(records, list) or len(records) > page_limit:
-                raise AirlockError("invalid_response", "Requester returned an invalid request list")
+                raise AirlockError(
+                    "invalid_response", "Requester returned an invalid request list"
+                )
             for item in records:
                 sanitized = _sanitize_record(item)
                 if state is None or sanitized["state"] == state:
@@ -182,10 +236,14 @@ class AirlockClient:
                 or not _valid_page_cursor(next_cursor)
                 or next_cursor in seen_cursors
             ):
-                raise AirlockError("invalid_response", "Requester returned an invalid page cursor")
+                raise AirlockError(
+                    "invalid_response", "Requester returned an invalid page cursor"
+                )
             seen_cursors.add(next_cursor)
             cursor = next_cursor
-        raise AirlockError("invalid_response", "Requester pagination exceeded the safety limit")
+        raise AirlockError(
+            "invalid_response", "Requester pagination exceeded the safety limit"
+        )
 
     def _request(
         self,
@@ -207,9 +265,13 @@ class AirlockClient:
         body = None
         headers = {"Accept": "application/json"}
         if payload is not None:
-            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            body = json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
             if len(body) > _MAX_REQUEST_BYTES:
-                raise AirlockError("invalid_input", "Airlock request payload is too large")
+                raise AirlockError(
+                    "invalid_input", "Airlock request payload is too large"
+                )
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
             self.base_url + path + query_string,
@@ -225,7 +287,9 @@ class AirlockClient:
         except urllib.error.HTTPError as exc:
             if 300 <= exc.code < 400:
                 raise AirlockError(
-                    "redirect_refused", "Airlock requester redirects are refused", exc.code
+                    "redirect_refused",
+                    "Airlock requester redirects are refused",
+                    exc.code,
                 ) from exc
             error_body = _read_error_body(exc)
             raise AirlockError("request_rejected", error_body, exc.code) from exc
@@ -235,7 +299,9 @@ class AirlockClient:
                 "Local Airlock requester is unavailable or timed out",
             ) from exc
         if not isinstance(data, dict):
-            raise AirlockError("invalid_response", "Requester JSON response must be an object")
+            raise AirlockError(
+                "invalid_response", "Requester JSON response must be an object"
+            )
         return data
 
 
@@ -265,7 +331,8 @@ def _validate_base_url(value: Any) -> str:
         address = ipaddress.ip_address(parsed.hostname)
     except ValueError as exc:
         raise AirlockError(
-            "invalid_config", "requester_url must use a loopback IP literal, not a hostname"
+            "invalid_config",
+            "requester_url must use a loopback IP literal, not a hostname",
         ) from exc
     if not address.is_loopback:
         raise AirlockError("invalid_config", "requester_url must remain on loopback")
@@ -290,11 +357,15 @@ def _valid_page_cursor(value: str) -> bool:
 def _read_json(response: Any) -> Any:
     raw = response.read(_MAX_RESPONSE_BYTES + 1)
     if len(raw) > _MAX_RESPONSE_BYTES:
-        raise AirlockError("invalid_response", "Requester response exceeded the size limit")
+        raise AirlockError(
+            "invalid_response", "Requester response exceeded the size limit"
+        )
     try:
-        return json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise AirlockError("invalid_response", "Requester returned invalid JSON") from exc
+        return _strict_json_loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise AirlockError(
+            "invalid_response", "Requester returned invalid JSON"
+        ) from exc
 
 
 def _read_error_body(response: Any) -> str:
@@ -302,10 +373,10 @@ def _read_error_body(response: Any) -> str:
         raw = response.read(_MAX_RESPONSE_BYTES + 1)
         if len(raw) > _MAX_RESPONSE_BYTES:
             return "Airlock requester rejected the request"
-        data = json.loads(raw)
+        data = _strict_json_loads(raw)
         if isinstance(data, dict) and isinstance(data.get("error"), str):
             return _bounded_message(data["error"])
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
         return "Airlock requester rejected the request"
     return "Airlock requester rejected the request"
 
@@ -317,35 +388,96 @@ def _bounded_message(value: str) -> str:
     return clean[:_MAX_ERROR_CHARS] or "Airlock requester rejected the request"
 
 
+def _strict_json_loads(raw: bytes) -> Any:
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key: {key}")
+            result[key] = value
+        return result
+
+    return json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+
+
 def _validated_string(value: Any, name: str, max_bytes: int) -> str:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > max_bytes:
+    if not isinstance(value, str) or not value or _utf8_length(value) > max_bytes:
         raise AirlockError("invalid_input", f"{name} has an invalid length")
     if _has_terminal_controls(value):
         raise AirlockError("invalid_input", f"{name} contains control characters")
     return value
 
 
-def _string_list(value: Any, field: str, maximum: int = 64) -> list[str]:
-    if not isinstance(value, list) or len(value) > maximum:
-        raise AirlockError("invalid_response", f"Requester response has invalid {field}")
-    return [_response_string(item, field, 128) for item in value]
-
-
 def _response_string(value: Any, field: str, max_bytes: int) -> str:
+    try:
+        length = len(value.encode("utf-8")) if isinstance(value, str) else -1
+    except UnicodeEncodeError:
+        length = -1
     if (
         not isinstance(value, str)
         or not value
-        or len(value.encode("utf-8")) > max_bytes
+        or length < 0
+        or length > max_bytes
         or _has_terminal_controls(value)
     ):
-        raise AirlockError("invalid_response", f"Requester response has invalid {field}")
+        raise AirlockError(
+            "invalid_response", f"Requester response has invalid {field}"
+        )
+    return value
+
+
+def _validated_command_string(value: Any, name: str, max_bytes: int) -> str:
+    value = _validated_string(value, name, max_bytes)
+    if _has_invisible_format_or_noncharacter(value):
+        raise AirlockError(
+            "invalid_input", f"{name} contains invisible format characters"
+        )
+    if _contains_likely_credential(value):
+        raise AirlockError(
+            "invalid_input", f"{name} appears to contain credential material"
+        )
+    return value
+
+
+def _response_command_string(value: Any, field: str, max_bytes: int) -> str:
+    value = _response_string(value, field, max_bytes)
+    if _has_invisible_format_or_noncharacter(value) or _contains_likely_credential(
+        value
+    ):
+        raise AirlockError(
+            "invalid_response", f"Requester response has invalid {field}"
+        )
     return value
 
 
 def _has_terminal_controls(value: str) -> bool:
     """Reject C0, DEL, and C1 terminal controls, including ANSI introducers."""
 
-    return any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in value)
+    bidi = {0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A)}
+    return any(
+        ord(character) < 32 or 127 <= ord(character) <= 159 or ord(character) in bidi
+        for character in value
+    )
+
+
+def _has_invisible_format_or_noncharacter(value: str) -> bool:
+    return any(
+        (0xFDD0 <= ord(character) <= 0xFDEF)
+        or (ord(character) <= 0x10FFFF and ord(character) & 0xFFFE == 0xFFFE)
+        or unicodedata.category(character) == "Cf"
+        for character in value
+    )
+
+
+def _contains_likely_credential(value: str) -> bool:
+    return any(pattern.search(value) is not None for pattern in _LIKELY_CREDENTIAL_PATTERNS)
+
+
+def _utf8_length(value: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise AirlockError("invalid_input", "text contains invalid Unicode") from exc
 
 
 def _utcnow() -> datetime:
@@ -356,132 +488,358 @@ def _rfc3339_timestamp(value: Any, field: str) -> datetime:
     timestamp = _response_string(value, field, 40)
     match = _RFC3339_RE.fullmatch(timestamp)
     if match is None:
-        raise AirlockError("invalid_response", f"Requester response has invalid {field}")
+        raise AirlockError(
+            "invalid_response", f"Requester response has invalid {field}"
+        )
     fraction = (match.group("fraction") or "")[:7]
     zone = "+00:00" if match.group("zone") == "Z" else match.group("zone")
     try:
-        return datetime.fromisoformat(f"{match.group('date')}{fraction}{zone}").astimezone(UTC)
+        return datetime.fromisoformat(
+            f"{match.group('date')}{fraction}{zone}"
+        ).astimezone(UTC)
     except ValueError as exc:
-        raise AirlockError("invalid_response", f"Requester response has invalid {field}") from exc
+        raise AirlockError(
+            "invalid_response", f"Requester response has invalid {field}"
+        ) from exc
 
 
-def _expired_window(created_raw: str, expires_raw: str, created_field: str, expires_field: str) -> bool:
+def _expired_window(
+    created_raw: str, expires_raw: str, created_field: str, expires_field: str
+) -> bool:
     created = _rfc3339_timestamp(created_raw, created_field)
     expires = _rfc3339_timestamp(expires_raw, expires_field)
     now = _utcnow()
     if expires <= created or created > now + timedelta(minutes=2):
-        raise AirlockError("invalid_response", "Requester response has an invalid time window")
+        raise AirlockError(
+            "invalid_response", "Requester response has an invalid time window"
+        )
     return expires <= now
 
 
-def _sanitize_capability(value: Any) -> dict[str, Any]:
+def _sanitize_profile(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise AirlockError("invalid_response", "Requester returned an invalid capability")
-    constraints = value.get("constraints")
-    if not isinstance(constraints, dict):
-        raise AirlockError("invalid_response", "Requester returned invalid capability constraints")
-    capability_id = _response_string(value.get("id"), "capability id", 128)
-    actions = _string_list(value.get("actions"), "actions")
-    owner = _response_string(constraints.get("owner"), "owner", 39)
-    collaborator = _response_string(constraints.get("collaborator"), "collaborator", 39)
-    permissions = _string_list(constraints.get("permissions"), "permissions", 2)
-    if (
-        not _CAPABILITY_RE.fullmatch(capability_id)
-        or actions != [_ALLOWED_ACTION]
-        or not _GITHUB_USER_RE.fullmatch(owner)
-        or not _GITHUB_USER_RE.fullmatch(collaborator)
-        or not permissions
-        or any(permission not in {"pull", "push"} for permission in permissions)
-        or permissions != sorted(set(permissions))
+        raise AirlockError("invalid_response", "Requester returned an invalid profile")
+    if set(value) != {
+        "id",
+        "version",
+        "display_name",
+        "authority_label",
+        "sandbox_label",
+        "network_label",
+        "cwd_label",
+        "output_label",
+        "limits",
+    }:
+        raise AirlockError(
+            "invalid_response", "Requester returned ambiguous profile fields"
+        )
+    limits = value.get("limits")
+    if not isinstance(limits, dict) or limits != {
+        "max_argv_count": 64,
+        "max_argument_bytes": 4096,
+        "max_aggregate_bytes": 32768,
+    }:
+        raise AirlockError(
+            "invalid_response", "Requester returned invalid profile limits"
+        )
+    profile_id = _response_string(value.get("id"), "profile id", 64)
+    profile_version = _response_string(value.get("version"), "profile version", 8)
+    if (profile_id, profile_version) != (
+        _PROFILE_ID,
+        _PROFILE_VERSION,
     ):
-        raise AirlockError("invalid_response", "Requester returned an unsupported capability")
+        raise AirlockError(
+            "invalid_response", "Requester returned an unsupported profile"
+        )
     return {
-        "id": capability_id,
-        "display_name": _response_string(value.get("display_name"), "display name", 100),
-        "actions": actions,
-        "constraints": {
-            "owner": owner,
-            "collaborator": collaborator,
-            "permissions": permissions,
-        },
+        "id": profile_id,
+        "version": profile_version,
+        "display_name": _response_string(
+            value.get("display_name"), "display name", 100
+        ),
+        "authority_label": _response_string(
+            value.get("authority_label"), "authority label", 200
+        ),
+        "sandbox_label": _response_string(
+            value.get("sandbox_label"), "sandbox label", 200
+        ),
+        "network_label": _response_string(
+            value.get("network_label"), "network label", 200
+        ),
+        "cwd_label": _response_string(value.get("cwd_label"), "cwd label", 200),
+        "output_label": _response_string(
+            value.get("output_label"), "output label", 200
+        ),
+        "limits": limits,
     }
 
 
 def _sanitize_record(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise AirlockError("invalid_response", "Requester returned an invalid request record")
+        raise AirlockError(
+            "invalid_response", "Requester returned an invalid request record"
+        )
     request = value.get("request")
     receipts = value.get("receipts")
     state = value.get("state")
     if receipts is None:
         receipts = []
-    if not isinstance(request, dict) or not isinstance(receipts, list) or state not in _ALLOWED_STATES:
-        raise AirlockError("invalid_response", "Requester returned a malformed request record")
-    arguments = request.get("arguments")
-    if not isinstance(arguments, dict) or set(arguments) != {"repository", "permission"}:
-        raise AirlockError("invalid_response", "Requester returned invalid request arguments")
+    if (
+        not isinstance(request, dict)
+        or not isinstance(receipts, list)
+        or state not in _ALLOWED_STATES
+    ):
+        raise AirlockError(
+            "invalid_response", "Requester returned a malformed request record"
+        )
     request_id = _response_string(request.get("id"), "request id", 84)
     digest = _response_string(request.get("digest"), "request digest", 64)
-    capability_id = _response_string(request.get("capability_id"), "capability id", 128)
-    action = _response_string(request.get("action"), "action", 128)
-    repository = _response_string(arguments.get("repository"), "repository", 100)
-    permission = _response_string(arguments.get("permission"), "permission", 8)
-    if (
-        request.get("version") != "airlock.request/v1"
-        or not _REQUEST_ID_RE.fullmatch(request_id)
-        or not _DIGEST_RE.fullmatch(digest)
-        or not _CAPABILITY_RE.fullmatch(capability_id)
-        or action != _ALLOWED_ACTION
-        or not _REPOSITORY_RE.fullmatch(repository)
-        or repository in {".", ".."}
-        or ".." in repository
-        or permission not in {"pull", "push"}
-    ):
-        raise AirlockError("invalid_response", "Requester returned an unsupported request record")
+    if not _REQUEST_ID_RE.fullmatch(request_id) or not _DIGEST_RE.fullmatch(digest):
+        raise AirlockError(
+            "invalid_response", "Requester returned an unsupported request record"
+        )
     created_at = _response_string(request.get("created_at"), "created_at", 40)
     expires_at = _response_string(request.get("expires_at"), "expires_at", 40)
     expired = _expired_window(created_at, expires_at, "created_at", "expires_at")
-    return {
+    request_version = request.get("version")
+    sanitized_receipts = [
+        _sanitize_receipt(item, request_id=request_id, request_digest=digest)
+        for item in receipts
+    ]
+    if request_version == "airlock.request/v2" and any(
+        item.get("version") != "airlock.receipt/v3" for item in receipts
+    ):
+        raise AirlockError(
+            "invalid_response", "Requester returned mixed command protocol versions"
+        )
+    if request_version == "airlock.request/v1" and any(
+        item.get("version") == "airlock.receipt/v3" for item in receipts
+    ):
+        raise AirlockError(
+            "invalid_response", "Requester returned mixed historical protocol versions"
+        )
+    _validate_receipt_history(
+        sanitized_receipts,
+        state=state,
+        request_created_at=created_at,
+        request_expires_at=expires_at,
+    )
+    if request_version == "airlock.request/v2":
+        reason = _response_command_string(request.get("reason"), "reason", 512)
+    else:
+        reason = _response_string(request.get("reason"), "reason", 512)
+    result = {
         "id": request_id,
         "state": state,
         "digest": digest,
-        "capability_id": capability_id,
-        "action": action,
-        "arguments": {"repository": repository, "permission": permission},
-        "reason": _response_string(request.get("reason"), "reason", 512),
+        "reason": reason,
         "created_at": created_at,
         "expires_at": expires_at,
         "expired": expired,
-        "receipts": [_sanitize_receipt(item) for item in receipts],
+        "receipts": sanitized_receipts,
     }
+    if request_version == "airlock.request/v2":
+        if any(field in request for field in ("capability_id", "action", "arguments")):
+            raise AirlockError(
+                "invalid_response", "Requester returned mixed command request fields"
+            )
+        profile_id = _response_string(request.get("profile_id"), "profile id", 64)
+        profile_version = _response_string(
+            request.get("profile_version"), "profile version", 8
+        )
+        argv = request.get("argv")
+        if (
+            (profile_id, profile_version) != (_PROFILE_ID, _PROFILE_VERSION)
+            or not isinstance(argv, list)
+            or not 1 <= len(argv) <= 64
+        ):
+            raise AirlockError(
+                "invalid_response", "Requester returned unsupported command argv"
+            )
+        argv = [_response_command_string(item, f"argv[{index}]", 4096) for index, item in enumerate(argv)]
+        if sum(_utf8_length(item) for item in argv) > 32768:
+            raise AirlockError(
+                "invalid_response", "Requester returned oversized command argv"
+            )
+        result.update(
+            {"profile_id": profile_id, "profile_version": profile_version, "argv": argv}
+        )
+    elif request_version == "airlock.request/v1":
+        if any(field in request for field in ("profile_id", "profile_version", "argv")):
+            raise AirlockError(
+                "invalid_response", "Requester returned mixed historical request fields"
+            )
+        arguments = request.get("arguments")
+        if not isinstance(arguments, dict) or set(arguments) != {
+            "repository",
+            "permission",
+        }:
+            raise AirlockError(
+                "invalid_response", "Requester returned invalid historical arguments"
+            )
+        result.update(
+            {
+                "historical_capability_id": _response_string(
+                    request.get("capability_id"), "capability id", 128
+                ),
+                "historical_action": _response_string(
+                    request.get("action"), "action", 128
+                ),
+                "historical_arguments": {
+                    "repository": _response_string(
+                        arguments.get("repository"), "repository", 100
+                    ),
+                    "permission": _response_string(
+                        arguments.get("permission"), "permission", 8
+                    ),
+                },
+            }
+        )
+    else:
+        raise AirlockError(
+            "invalid_response", "Requester returned an unsupported request version"
+        )
+    return result
 
 
-def _sanitize_receipt(value: Any) -> dict[str, Any]:
+def _sanitize_receipt(
+    value: Any, *, request_id: str | None = None, request_digest: str | None = None
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise AirlockError("invalid_response", "Requester returned an invalid receipt")
     receipt_id = _response_string(value.get("id"), "receipt id", 84)
     decision = _response_string(value.get("decision"), "receipt decision", 64)
-    adapter_version = _response_string(value.get("adapter_version"), "adapter version", 128)
     version = value.get("version")
-    allowed_decisions = _RECEIPT_DECISIONS.get(version) if isinstance(version, str) else None
+    allowed_decisions = (
+        _RECEIPT_DECISIONS.get(version) if isinstance(version, str) else None
+    )
     if (
         allowed_decisions is None
         or not _RECEIPT_ID_RE.fullmatch(receipt_id)
         or decision not in allowed_decisions
-        or adapter_version != _ADAPTER_VERSION
     ):
-        raise AirlockError("invalid_response", "Requester returned an unsupported receipt")
+        raise AirlockError(
+            "invalid_response", "Requester returned an unsupported receipt"
+        )
+    if request_id is not None:
+        bound_id = _response_string(value.get("request_id"), "receipt request id", 84)
+        bound_digest = _response_string(
+            value.get("request_digest"), "receipt request digest", 64
+        )
+        if bound_id != request_id or bound_digest != request_digest:
+            raise AirlockError(
+                "invalid_response", "Requester returned a misbound receipt"
+            )
     created_at = _response_string(value.get("created_at"), "receipt created_at", 40)
     expires_at = _response_string(value.get("expires_at"), "receipt expires_at", 40)
     expired = _expired_window(
         created_at, expires_at, "receipt created_at", "receipt expires_at"
     )
-    return {
+    result = {
         "id": receipt_id,
         "decision": decision,
         "reviewer": _response_string(value.get("reviewer"), "reviewer", 254),
-        "adapter_version": adapter_version,
         "created_at": created_at,
         "expires_at": expires_at,
         "expired": expired,
     }
+    if version == "airlock.receipt/v3":
+        if "adapter_version" in value:
+            raise AirlockError(
+                "invalid_response", "Requester returned mixed command receipt fields"
+            )
+        if (
+            value.get("profile_id") != _PROFILE_ID
+            or value.get("profile_version") != _PROFILE_VERSION
+        ):
+            raise AirlockError(
+                "invalid_response", "Requester returned an unsupported command receipt"
+            )
+        plan_digest = _response_string(value.get("plan_digest"), "plan digest", 64)
+        if not _DIGEST_RE.fullmatch(plan_digest):
+            raise AirlockError(
+                "invalid_response", "Requester returned an invalid plan digest"
+            )
+        result.update(
+            {
+                "profile_id": _PROFILE_ID,
+                "profile_version": _PROFILE_VERSION,
+                "plan_digest": plan_digest,
+            }
+        )
+    else:
+        if any(
+            field in value for field in ("profile_id", "profile_version", "plan_digest")
+        ):
+            raise AirlockError(
+                "invalid_response", "Requester returned mixed legacy receipt fields"
+            )
+        adapter_version = _response_string(
+            value.get("adapter_version"), "adapter version", 128
+        )
+        if adapter_version != _ADAPTER_VERSION:
+            raise AirlockError(
+                "invalid_response", "Requester returned an unsupported legacy receipt"
+            )
+        result["adapter_version"] = adapter_version
+    return result
+
+
+def _validate_receipt_history(
+    receipts: list[dict[str, Any]],
+    *,
+    state: str,
+    request_created_at: str,
+    request_expires_at: str,
+) -> None:
+    derived_state = "pending"
+    request_created = _rfc3339_timestamp(request_created_at, "created_at")
+    request_expires = _rfc3339_timestamp(request_expires_at, "expires_at")
+    previous_created: datetime | None = None
+    seen_ids: set[str] = set()
+    for index, receipt in enumerate(receipts):
+        created = _rfc3339_timestamp(receipt["created_at"], "receipt created_at")
+        if (
+            receipt["id"] in seen_ids
+            or created < request_created
+            or created >= request_expires
+            or (previous_created is not None and created < previous_created)
+        ):
+            raise AirlockError(
+                "invalid_response", "Requester returned invalid receipt history"
+            )
+        seen_ids.add(receipt["id"])
+        previous_created = created
+        decision = receipt["decision"]
+        transition = {
+            ("pending", "approved_for_manual_execution"): "approved",
+            ("pending", "approved_for_execution"): "approved_for_execution",
+            ("pending", "denied"): "denied",
+            ("approved", "manually_executed"): "manually_executed",
+            (
+                "approved_for_execution",
+                "approved_for_execution",
+            ): "approved_for_execution",
+            ("approved_for_execution", "executed"): "executed",
+        }.get((derived_state, decision))
+        if transition is None:
+            raise AirlockError(
+                "invalid_response", "Requester returned invalid receipt transition"
+            )
+        if (
+            "plan_digest" in receipt
+            and decision == "executed"
+            and (
+                index == 0
+                or any(
+                    receipts[index - 1].get(field) != receipt.get(field)
+                    for field in ("profile_id", "profile_version", "plan_digest")
+                )
+            )
+        ):
+            raise AirlockError(
+                "invalid_response", "Requester returned execution plan drift"
+            )
+        derived_state = transition
+    if derived_state != state:
+        raise AirlockError("invalid_response", "Requester returned receipt/state drift")

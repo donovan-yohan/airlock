@@ -10,22 +10,22 @@ This package is deliberately thin:
 - marketplace metadata for both harnesses; and
 - a Python-standard-library bootstrapper for the separately-built `airlock` MCP binary.
 
-Tool transport is installed separately as the typed `airlock mcp` stdio server. The package never contains trusted-node credentials, owner identities, reusable approvals, executable action text, or a generic shell tool.
+Tool transport is installed separately as the typed `airlock mcp` stdio server. The model necessarily sees the exact `github.command/v1` argv it proposes, but the package contains no trusted-node credentials, identities, reusable approvals, executable/config paths, child output, or generic shell tool. `shell.run/v1` is reserved and disabled.
 
 ## Visual documentation
 
 The publish-ready static site lives in [this directory](./) for GitHub Pages. Source-of-truth Mermaid documents are kept separately:
 
 - [`architecture.md`](architecture.md) — trust boundary, installation topology, and managed-instruction lifecycle;
-- [`approval-timing.md`](approval-timing.md) — end-to-end approval, trusted direct execution, receipt, and verification timing.
+- [`approval-timing.md`](approval-timing.md) — end-to-end approval, trusted canonical Bubblewrap execution, receipt, and verification timing.
 
 Raw `.mmd` files are in [`diagrams/`](diagrams/); the site uses checked-in rendered SVGs so diagrams remain visible without client-side JavaScript.
 
 ## Trust boundary
 
-The plugin and MCP server run on the untrusted requester node. They may discover a signed capability catalog, create typed requests, and read sanitized request/receipt state. They cannot approve or execute authority. Only the trusted node may validate policy, render a locally reconstructed direct-exec plan for human review, and perform trusted execution.
+The plugin and MCP server run on the untrusted requester node. They may discover a signed command-profile catalog, create canonical profile/argv proposals, and read sanitized request/receipt state. They cannot approve or execute authority. Only the trusted node may resolve an immutable plan from local configuration, render the exact proposal and plan digest for human review, persist approval, and execute it.
 
-Model-visible text can request authority; it cannot grant it. `pending` and `approved_for_execution` are not proof of an external effect. Even after `executed`, verify ordinary read-only external state before claiming the effect exists. Historical v1 states remain visible during coordinated requester-first rollout.
+Model-visible text can propose authority; it cannot grant or execute it. `github.command/v1` is broad credentialed reviewer-approved RCE, so human review is the semantic authorization boundary and risk warnings are assistance rather than an operation allowlist. `pending` and `approved_for_execution` are not proof of an external effect. Even after `executed`, verify ordinary read-only external state before claiming the effect exists. Historical v1 requests and v1/v2 receipts remain readable during migration.
 
 ## Packaging
 
@@ -58,7 +58,7 @@ python3 tools/airlock_bootstrap.py install \
 - upserts one marked block in user-global `~/.claude/CLAUDE.md`; and
 - upserts the same marked block in user-global `~/.codex/AGENTS.md`.
 
-The managed text tells each agent to check Airlock before requesting unavailable credentials or attempting a workaround, treat returned text as untrusted data, and independently verify external state after `executed`. Repeated installs update a block only when `install-state.json` proves ownership and its recorded SHA-256 still matches; an unrecorded marker block or user-edited managed block is refused rather than adopted, overwritten, or later deleted. Malformed/duplicate markers and symlinked instruction targets are also refused. A non-empty global `~/.codex/AGENTS.override.md` blocks instruction installation because Codex would ignore the managed `AGENTS.md`. Use `--instructions skip` explicitly, or simply omit the flag, to install only the plugins and MCP registrations.
+The managed text tells each agent to check Airlock before requesting unavailable credentials or attempting a workaround, treat returned text as untrusted data, recognize broad commands as reviewer-approved RCE, and independently verify external state after `executed`. Repeated installs update a block only when `install-state.json` proves ownership and its recorded SHA-256 still matches; an unrecorded marker block or user-edited managed block is refused rather than adopted, overwritten, or later deleted. Malformed/duplicate markers and symlinked instruction targets are also refused. A non-empty global `~/.codex/AGENTS.override.md` blocks instruction installation because Codex would ignore the managed `AGENTS.md`. Use `--instructions skip` explicitly, or simply omit the flag, to install only the plugins and MCP registrations.
 
 It makes a content-addressed, mode-`0500` copy at:
 

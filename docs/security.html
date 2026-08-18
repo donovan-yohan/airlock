@@ -44,7 +44,7 @@
         <section id="model">
           <p class="kicker">Threat model</p>
           <h2>Untrusted by location, content, and intent</h2>
-          <p>The harness, skill text, MCP process, requester service, capability labels, request descriptions, and model-generated fields all live on or originate from the untrusted side. Signed catalog metadata proves origin and integrity; it does not turn descriptive text into instructions.</p>
+          <p>The harness, skill text, MCP process, requester service, profile labels, reasons, argv, and model-generated fields all live on or originate from the untrusted side. Signed catalog metadata proves origin and integrity; it does not turn descriptive text into instructions.</p>
           <div class="notice"><strong>Core rule:</strong> model-visible text can request authority. It can never grant authority.</div>
         </section>
 
@@ -52,11 +52,11 @@
           <p class="kicker">Model-facing surface</p>
           <h2>Exactly three tools</h2>
           <ul class="tool-list">
-            <li><strong><code>airlock_capabilities</code></strong><br>Discover sanitized signed capability entries before asking for credentials or inventing a bypass.</li>
-            <li><strong><code>airlock_create_request</code></strong><br>Submit only the strict typed fields required by an exact matching capability.</li>
-            <li><strong><code>airlock_requests</code></strong><br>Read sanitized request and receipt state without trusted action text or reusable approvals.</li>
+            <li><strong><code>airlock_capabilities</code></strong><br>Discover the signed <code>github.command/v1</code> profile, labels, and argv limits.</li>
+            <li><strong><code>airlock_create_request</code></strong><br>Submit exact ordered <code>gh</code> argv and a bounded reason. This does not execute it.</li>
+            <li><strong><code>airlock_requests</code></strong><br>Read sanitized proposal and receipt state without trusted paths, output, or reusable approvals.</li>
           </ul>
-          <p>There are no hooks, provider clients, shell commands, command strings, trusted-node URLs, secret headers, or direct execution methods in the model surface.</p>
+          <p>Proposed argv is model-visible because it is the request. There are no hooks, provider clients, shell interpreters, trusted-node URLs, secret headers, output fields, or direct execution methods in the model surface. <code>shell.run/v1</code> is reserved but disabled.</p>
         </section>
 
         <section id="network">
@@ -72,20 +72,21 @@
 
         <section id="trusted-side">
           <p class="kicker">Trusted side</p>
-          <h2>Revalidate and reconstruct locally</h2>
-          <p>The trusted node pulls requests rather than accepting inbound trusted action text. It verifies the signed catalog context, request digest, expiry, capability identity, and a versioned local adapter's constraints. Request IDs are idempotent and cannot be reused with a different bound digest.</p>
-          <p>Only then does it render a locally reconstructed plan for human review. The configured absolute GitHub CLI and exact argv are passed directly with a fixed minimal environment: no shell, PATH lookup, inherited token/proxy environment, or generic command field exists.</p>
+          <h2>Resolve authority locally</h2>
+          <p>The trusted node pulls hostile proposals and verifies the signed catalog context, canonical digest, expiry, profile/version, argv bounds, and idempotent request identity. Request IDs cannot be reused with different bytes.</p>
+          <p>Only then does it resolve a plan from trusted-local configuration: absolute GitHub CLI path and SHA-256 identity, exact proposed argv, authority/identity/sandbox/network/cwd/output labels, config version, fixed environment, and bounded timeout. The plan digest and plan persist before invocation. No shell or PATH lookup occurs; shell metacharacters remain argv data.</p>
+          <p>Each Linux child runs in Bubblewrap with only its pinned static <code>gh</code>, private work directory, read-only minimal <code>hosts.yml</code> snapshot, and CA/DNS runtime data. It inherits no ambient HOME/token/proxy variables. Stdout/stderr previews are separately bounded, sanitized, and credential-redacted for trusted review only; they never cross to requester/MCP/Hermes, receipts, or ordinary logs. Network, including host loopback, remains shared, so this is not an egress firewall or a semantic-safety claim.</p>
           <p>Linux local control uses an owner-private Unix socket and verifies <code>SO_PEERCRED</code> for every accepted connection before HTTP reads it. The peer UID must equal the daemon's effective UID; filesystem modes are defense-in-depth, not an authentication substitute. Unsupported platforms fail closed instead of exposing this control plane without peer credentials.</p>
         </section>
 
         <section id="human">
           <p class="kicker">Human boundary</p>
-          <h2>One trusted human approval before direct execution</h2>
+          <h2>One trusted human approval before pinned execution</h2>
           <ol>
-            <li><strong>Decision:</strong> inspect the validated request and exact plan, then choose Approve and execute or deny.</li>
+            <li><strong>Decision:</strong> inspect request and plan digests, every argv element, local policy labels, and risk warnings, then approve that exact plan or deny.</li>
             <li><strong>Attempt:</strong> Airlock persists approval plus a running reservation, then executes outside its store lock. Failures are bounded and retries are explicit.</li>
           </ol>
-          <p>Requester/MCP/Hermes surfaces do not bridge this action. See the <a href="approval-timing.html">approval timing diagram</a> for the full sequence.</p>
+          <p>Requester/MCP/Hermes surfaces do not bridge this action. There is no edit path: deny and resubmit. Risk warnings are reviewer assistance, not an operation allowlist. An approved broad credentialed command is reviewer-approved RCE. See the <a href="approval-timing.html">approval timing diagram</a> for the full sequence.</p>
         </section>
 
         <section id="installer">
@@ -104,7 +105,7 @@
         <section id="receipts">
           <p class="kicker">Evidence semantics</p>
           <h2>Receipts describe workflow state, not external truth</h2>
-          <p><code>approved_for_execution</code> proves a trusted reviewer reservation. <code>executed</code> proves only that the trusted child returned success and its completion persisted. Neither proves the provider accepted the action or that the intended state exists.</p>
+          <p><code>approved_for_execution</code> proves a trusted reviewer reserved one exact plan digest. <code>executed</code> proves only that the trusted child returned success and its completion persisted. It does not prove provider state: whether the provider accepted the action or the intended state exists.</p>
           <p>Every success claim therefore ends with an independent ordinary read-only verification path.</p>
         </section>
       </article>

@@ -1,12 +1,15 @@
 package trusted
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,7 +22,9 @@ import (
 	"time"
 
 	"github.com/donovan-yohan/airlock/internal/config"
+	"github.com/donovan-yohan/airlock/internal/mcp"
 	"github.com/donovan-yohan/airlock/internal/model"
+	"github.com/donovan-yohan/airlock/internal/paging"
 	"github.com/donovan-yohan/airlock/internal/requester"
 	"github.com/donovan-yohan/airlock/internal/statefile"
 )
@@ -31,10 +36,10 @@ func TestExecutionPlanIsTypedAbsoluteAndHasFixedEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantArgv := []string{"api", "--method", "PUT", "repos/example-owner/project/collaborators/example-agent", "-f", "permission=push", "--silent"}
-	if plan.Executable != "/opt/airlock/bin/gh" || !equalStrings(plan.Argv, wantArgv) || plan.Display != "/opt/airlock/bin/gh api --method PUT repos/example-owner/project/collaborators/example-agent -f permission=push --silent" {
+	if plan.Executable != "/opt/airlock/bin/gh" || !equalStrings(plan.Argv, wantArgv) || escapedCommand(plan) != `"/opt/airlock/bin/gh" "api" "--method" "PUT" "repos/example-owner/project/collaborators/example-agent" "-f" "permission=push" "--silent"` || plan.Digest == "" {
 		t.Fatalf("unexpected direct-exec plan: %#v", plan)
 	}
-	environment := minimalChildEnvironment("/var/lib/airlock/gh")
+	environment := minimalChildEnvironment()
 	for _, forbidden := range []string{"GH_TOKEN=", "GITHUB_TOKEN=", "HTTP_PROXY=", "HTTPS_PROXY=", "ALL_PROXY="} {
 		for _, value := range environment {
 			if strings.HasPrefix(value, forbidden) {
@@ -42,8 +47,11 @@ func TestExecutionPlanIsTypedAbsoluteAndHasFixedEnvironment(t *testing.T) {
 			}
 		}
 	}
-	if !contains(environment, "GH_CONFIG_DIR=/var/lib/airlock/gh") || !contains(environment, "GH_PROMPT_DISABLED=1") || !contains(environment, "NO_COLOR=1") || !contains(environment, "HOME=/var/lib/airlock/gh") {
+	if !contains(environment, "GH_CONFIG_DIR=/airlock/home/.config/gh") || !contains(environment, "GH_PROMPT_DISABLED=1") || !contains(environment, "NO_COLOR=1") || !contains(environment, "HOME=/airlock/home") || !contains(environment, "XDG_CONFIG_HOME=/airlock/home/.config") {
 		t.Fatalf("child environment is not the fixed minimum: %#v", environment)
+	}
+	if wantPolicy := append(append([]string(nil), environment...), "PWD=/airlock/work"); !equalStrings(plan.EnvironmentPolicy, wantPolicy) {
+		t.Fatalf("reviewed environment policy diverged from runtime: plan=%#v runtime=%#v", plan.EnvironmentPolicy, wantPolicy)
 	}
 	for _, hostile := range []model.Request{
 		mutatedRequest(t, now, map[string]string{"repository": "project;id", "permission": "push"}),
@@ -63,7 +71,7 @@ func TestHostileAndStaleRequestsNeverReachExecutor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC().Truncate(time.Second)
+	now := time.Now().UTC().Add(-5 * time.Minute).Truncate(time.Second)
 	store, runner := trustedTestStore(t, privateKey, now)
 	for _, request := range []model.Request{
 		mutatedRequest(t, now, map[string]string{"repository": "project;touch", "permission": "push"}),
@@ -112,10 +120,11 @@ func TestExecuteRouteEnforcesIdentityCSRFOriginMethodFormAndQuery(t *testing.T) 
 	review.Header.Set("X-Airlock-Dev-Identity", "reviewer@example.invalid")
 	reviewResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(reviewResponse, review)
-	if reviewResponse.Code != http.StatusOK || !strings.Contains(reviewResponse.Body.String(), "Approve and execute") || !strings.Contains(reviewResponse.Body.String(), "Locally reconstructed action") {
+	if reviewResponse.Code != http.StatusOK || !strings.Contains(reviewResponse.Body.String(), "Approve exact plan and execute") || !strings.Contains(reviewResponse.Body.String(), "Resolved immutable plan") {
 		t.Fatalf("review page was not trusted-execution UI: %d %q", reviewResponse.Code, reviewResponse.Body.String())
 	}
 	cookie := reviewResponse.Result().Cookies()[0]
+	planDigest := trustedPlanDigest(t, store, requestObject.ID)
 	post := func(target, form string, headers map[string]string) *httptest.ResponseRecorder {
 		r := trustedRequest(t, http.MethodPost, target, strings.NewReader(form), headers)
 		r.Header.Set("X-Airlock-Dev-Identity", "reviewer@example.invalid")
@@ -133,10 +142,10 @@ func TestExecuteRouteEnforcesIdentityCSRFOriginMethodFormAndQuery(t *testing.T) 
 	if got := post("/requests/"+requestObject.ID+"/execute?x=1", url.Values{"csrf_token": {server.csrf}}.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"}); got.Code != http.StatusBadRequest {
 		t.Fatalf("query=%d", got.Code)
 	}
-	if got := post("/requests/"+requestObject.ID+"/execute", url.Values{"csrf_token": {server.csrf}}.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "cross-site"}); got.Code != http.StatusForbidden {
+	if got := post("/requests/"+requestObject.ID+"/execute", url.Values{"csrf_token": {server.csrf}, "plan_digest": {planDigest}}.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "cross-site"}); got.Code != http.StatusForbidden {
 		t.Fatalf("cross-site=%d", got.Code)
 	}
-	if got := post("/requests/"+requestObject.ID+"/execute", url.Values{"csrf_token": {server.csrf}}.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"}); got.Code != http.StatusSeeOther {
+	if got := post("/requests/"+requestObject.ID+"/execute", url.Values{"csrf_token": {server.csrf}, "plan_digest": {planDigest}, "confirm_full_authority": {"true"}}.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"}); got.Code != http.StatusSeeOther {
 		t.Fatalf("execution=%d body=%q", got.Code, got.Body.String())
 	}
 	if runner.Calls() != 1 {
@@ -151,7 +160,7 @@ func TestExecuteRouteEnforcesIdentityCSRFOriginMethodFormAndQuery(t *testing.T) 
 	terminalResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(terminalResponse, terminalReview)
 	terminalBody := terminalResponse.Body.String()
-	if terminalResponse.Code != http.StatusOK || !strings.Contains(terminalBody, "this does not prove GitHub state") || !strings.Contains(terminalBody, "independent read-only provider check") || strings.Contains(terminalBody, "Approve and execute") {
+	if terminalResponse.Code != http.StatusOK || !strings.Contains(terminalBody, "this does not prove GitHub state") || !strings.Contains(terminalBody, "independent read-only provider check") || strings.Contains(terminalBody, "Approve exact plan and execute") {
 		t.Fatalf("executed review page overclaimed provider state: %d %q", terminalResponse.Code, terminalBody)
 	}
 }
@@ -176,13 +185,16 @@ func TestApprovalReservationPrecedesExactlyOneConcurrentInvocation(t *testing.T)
 		}
 	}
 	done := make(chan error, 1)
-	go func() { done <- store.Execute(context.Background(), request.ID, "reviewer@example.invalid") }()
+	planDigest := trustedPlanDigest(t, store, request.ID)
+	go func() {
+		done <- store.Execute(context.Background(), request.ID, "reviewer@example.invalid", planDigest)
+	}()
 	select {
 	case <-runner.started:
 	case <-time.After(2 * time.Second):
 		t.Fatal("provider did not begin")
 	}
-	if err := store.Execute(context.Background(), request.ID, "reviewer@example.invalid"); !errors.Is(err, ErrExecutionActive) {
+	if err := store.Execute(context.Background(), request.ID, "reviewer@example.invalid", planDigest); !errors.Is(err, ErrExecutionActive) {
 		t.Fatalf("concurrent execute=%v", err)
 	}
 	close(release)
@@ -207,7 +219,7 @@ func TestAmbiguousExecutionFailureIsUncertainRetryableAndDoesNotPersistOutput(t 
 	}
 	canary := "provider-output-canary-DO-NOT-PERSIST"
 	runner.err = errors.New(canary)
-	if err := store.Execute(context.Background(), request.ID, "reviewer@example.invalid"); !errors.Is(err, ErrExecutionUncertain) {
+	if err := store.Execute(context.Background(), request.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, request.ID)); !errors.Is(err, ErrExecutionUncertain) {
 		t.Fatalf("failure result=%v", err)
 	}
 	record, _, _ := store.Record(request.ID)
@@ -219,7 +231,7 @@ func TestAmbiguousExecutionFailureIsUncertainRetryableAndDoesNotPersistOutput(t 
 		t.Fatal("raw executor output/error leaked to state")
 	}
 	runner.err = nil
-	if err := store.Execute(context.Background(), request.ID, "reviewer@example.invalid"); err != nil {
+	if err := store.Execute(context.Background(), request.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, request.ID)); err != nil {
 		t.Fatalf("explicit retry=%v", err)
 	}
 	record, _, _ = store.Record(request.ID)
@@ -236,17 +248,18 @@ func TestMissingExecutableCancelAndRestartAreTruthful(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	store, _ := trustedTestStore(t, privateKey, now)
 	store.runner = directExecutionRunner{}
+	store.verifyExecutable = true
 	store.execution.GitHubCLIPath = "/definitely/not/a/gh-binary"
 	request := trustedTestRequest(t, now)
 	if err := store.Ingest(request); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Execute(context.Background(), request.ID, "reviewer@example.invalid"); !errors.Is(err, ErrExecutionFailed) {
+	if err := store.Execute(context.Background(), request.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, request.ID)); !errors.Is(err, ErrExecutionFailed) {
 		t.Fatalf("missing executable=%v", err)
 	}
 	record, _, _ := store.Record(request.ID)
-	if record.State != attemptStatusFailed || record.Attempts[0].FailureCode != "missing_executable" || len(record.Receipts) != 1 {
-		t.Fatalf("missing executable became success: %#v", record)
+	if record.State != "pending" || len(record.Attempts) != 0 || len(record.Receipts) != 0 {
+		t.Fatalf("missing executable reserved execution: %#v", record)
 	}
 
 	// A crash after reservation leaves durable running state. Construction must
@@ -260,9 +273,10 @@ func TestMissingExecutableCancelAndRestartAreTruthful(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.execution.GitHubCLIPath = "/trusted/fake/gh"
-	if _, _, _, err := store.reserveExecution(second.ID, "reviewer@example.invalid"); err != nil {
+	if _, _, _, err := store.reserveExecution(second.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, second.ID)); err != nil {
 		t.Fatal(err)
 	}
+	beforeRecovery := trustedStateBytes(t, store.path)
 	restarted, err := NewStore(filepathDir(store.path), privateKey, trustedTestCapabilities(), 15*time.Minute, time.Hour, *store.execution)
 	if err != nil {
 		t.Fatal(err)
@@ -271,6 +285,232 @@ func TestMissingExecutableCancelAndRestartAreTruthful(t *testing.T) {
 	if record.State != attemptStatusUncertain || record.Attempts[0].Status != attemptStatusUncertain || record.Attempts[0].FailureCode != "interrupted" {
 		t.Fatalf("running attempt did not become uncertain: %#v", record)
 	}
+	if afterRecovery := trustedStateBytes(t, store.path); bytes.Equal(beforeRecovery, afterRecovery) {
+		t.Fatal("running recovery did not durably publish uncertain state")
+	}
+}
+
+func TestServingStoreStartupPreservesDurableEvidenceAcrossEnvironmentAndPolicyChanges(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+
+	t.Run("missing or non-private hosts fail before state rewrite", func(t *testing.T) {
+		for _, change := range []struct {
+			name  string
+			apply func(t *testing.T, path string)
+		}{
+			{"missing", func(t *testing.T, path string) {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			}},
+			{"non-private", func(t *testing.T, path string) {
+				if err := os.Chmod(path, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		} {
+			t.Run(change.name, func(t *testing.T) {
+				store, _ := trustedTestStore(t, privateKey, now)
+				request := currentCommandRequest(t, now, "req_0123456789abcdefghij", []string{"api", "user"})
+				if err := store.Ingest(request); err != nil {
+					t.Fatal(err)
+				}
+				before := trustedStateBytes(t, store.path)
+				change.apply(t, filepath.Join(store.execution.GitHubConfigDir, "hosts.yml"))
+				if _, err := NewStore(filepath.Dir(store.path), privateKey, trustedTestCapabilities(), 15*time.Minute, time.Hour, trustedTestExecutionConfig(store.execution.GitHubConfigDir)); err == nil {
+					t.Fatal("invalid hosts.yml allowed a serving store startup")
+				}
+				if after := trustedStateBytes(t, store.path); !bytes.Equal(before, after) {
+					t.Fatal("invalid hosts.yml rewrote trusted durable state")
+				}
+			})
+		}
+	})
+
+	t.Run("TTL tightening preserves request and receipt history", func(t *testing.T) {
+		store, _ := trustedTestStore(t, privateKey, now)
+		request := currentCommandRequest(t, now, "req_0123456789abcdefghij", []string{"api", "user"})
+		if err := store.Ingest(request); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Execute(context.Background(), request.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, request.ID)); err != nil {
+			t.Fatal(err)
+		}
+		for _, delivery := range store.state.Requests[request.ID].Receipts {
+			if err := store.MarkDelivered(delivery.Receipt.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before := trustedStateBytes(t, store.path)
+		recovered, err := NewStore(filepath.Dir(store.path), privateKey, trustedTestCapabilities(), 5*time.Minute, time.Minute, *store.execution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record, _, found := recovered.Record(request.ID); !found || record.State != model.DecisionExecuted || len(record.Receipts) != 2 {
+			t.Fatalf("TTL tightening erased valid durable request or receipt: found=%v record=%#v", found, record)
+		}
+		if after := trustedStateBytes(t, store.path); !bytes.Equal(before, after) {
+			t.Fatal("TTL tightening rewrote trusted request/receipt history")
+		}
+	})
+
+	t.Run("removed legacy capability preserves non-actionable history", func(t *testing.T) {
+		store, _ := trustedTestStore(t, privateKey, now)
+		request := trustedTestRequest(t, now)
+		if err := store.Ingest(request); err != nil {
+			t.Fatal(err)
+		}
+		before := trustedStateBytes(t, store.path)
+		recovered, err := NewStore(filepath.Dir(store.path), privateKey, nil, 15*time.Minute, time.Hour, *store.execution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record, plan, found := recovered.Record(request.ID); !found || record.State != "pending" || plan != nil {
+			t.Fatalf("removed capability history was not retained/non-actionable: found=%v state=%q plan=%#v", found, record.State, plan)
+		}
+		if after := trustedStateBytes(t, store.path); !bytes.Equal(before, after) {
+			t.Fatal("removed capability rewrote trusted history")
+		}
+	})
+
+	t.Run("bad receipt signature preserves bytes and refuses startup", func(t *testing.T) {
+		store, _ := trustedTestStore(t, privateKey, now)
+		request := currentCommandRequest(t, now, "req_0123456789abcdefghij", []string{"api", "user"})
+		if err := store.Ingest(request); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Execute(context.Background(), request.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, request.ID)); err != nil {
+			t.Fatal(err)
+		}
+		tampered := clonePersistedState(store.state)
+		record := tampered.Requests[request.ID]
+		record.Receipts[0].Receipt.Signature = strings.Repeat("A", len(record.Receipts[0].Receipt.Signature))
+		tampered.Requests[request.ID] = record
+		if err := store.commit(tampered); err != nil {
+			t.Fatal(err)
+		}
+		before := trustedStateBytes(t, store.path)
+		if _, err := NewStore(filepath.Dir(store.path), privateKey, trustedTestCapabilities(), 15*time.Minute, time.Hour, *store.execution); err == nil {
+			t.Fatal("tampered signature was silently removed during startup")
+		}
+		if after := trustedStateBytes(t, store.path); !bytes.Equal(before, after) {
+			t.Fatal("tampered trusted record was rewritten")
+		}
+	})
+
+	t.Run("attempt history exposes its persisted plan without current re-resolution", func(t *testing.T) {
+		store, _ := trustedTestStore(t, privateKey, now)
+		request := currentCommandRequest(t, now, "req_0123456789abcdefghij", []string{"api", "user"})
+		if err := store.Ingest(request); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Execute(context.Background(), request.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, request.ID)); err != nil {
+			t.Fatal(err)
+		}
+		want := store.state.Requests[request.ID].Attempts[0].Plan.Digest
+		changed := *store.execution
+		changed.ProfileConfigVersion = "changed-policy-v2"
+		recovered, err := NewStore(filepath.Dir(store.path), privateKey, nil, 15*time.Minute, time.Hour, changed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, plan, found := recovered.Record(request.ID); !found || plan == nil || plan.Digest != want {
+			t.Fatalf("completed immutable plan was re-resolved or hidden: found=%v plan=%#v", found, plan)
+		}
+	})
+}
+
+func trustedStateBytes(t *testing.T, path string) []byte {
+	t.Helper()
+	bytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes
+}
+
+func TestMaximumTrustedStateFitsAtomicFileWithLiteralEscapableData(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	store, _ := trustedTestStore(t, privateKey, now)
+	store.execution.GitHubCLIPath = "/" + strings.Repeat(`"`, maxExecutionPathBytes-1)
+	store.execution.Profile = model.CommandProfile{
+		ID: model.ProfileGitHubCommandID, Version: model.ProfileGitHubCommandVersion,
+		DisplayName: strings.Repeat(`"`, 200), AuthorityLabel: strings.Repeat(`"`, 200), SandboxLabel: strings.Repeat(`"`, 200),
+		NetworkLabel: strings.Repeat(`"`, 200), CWDLabel: strings.Repeat(`"`, 200), OutputLabel: strings.Repeat(`"`, 200),
+		Limits: model.ProfileLimits{MaxArgvCount: model.MaxArgvCount, MaxArgumentBytes: model.MaxArgumentBytes, MaxAggregateBytes: model.MaxArgvAggregateBytes},
+	}
+	store.execution.ExecutionIdentity = strings.Repeat(`"`, 200)
+	store.execution.ProfileConfigVersion = strings.Repeat("p", 64)
+
+	state := persistedState{Requests: make(map[string]Record, maxTrustedRequests)}
+	for index := range maxTrustedRequests {
+		request := maximalTrustedRequest(t, now, fmt.Sprintf("req_%020d", index))
+		plan, err := resolveExecutionPlan(request, store.capabilities, now, store.requestMaxTTL, store.execution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := Record{Request: request, State: model.DecisionExecuted, Receipts: make([]Delivery, 0, maxReceiptsPerRecord), Attempts: make([]ExecutionAttempt, 0, maxExecutionAttempts)}
+		for attemptIndex := range maxExecutionAttempts {
+			at := now.Add(time.Duration(attemptIndex) * time.Second)
+			approval, err := store.newReceipt(request, model.DecisionApproveForExecution, strings.Repeat(`"`, 254), plan, at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record.Receipts = append(record.Receipts, Delivery{Receipt: approval})
+			status, code := attemptStatusUncertain, "nonzero_exit"
+			if attemptIndex == maxExecutionAttempts-1 {
+				status, code = attemptStatusSucceeded, ""
+			}
+			record.Attempts = append(record.Attempts, ExecutionAttempt{
+				ID: fmt.Sprintf("att_%020d_%020d", index, attemptIndex), RequestDigest: request.Digest, Reviewer: strings.Repeat(`"`, 254),
+				ProfileID: plan.ProfileID, ProfileVersion: plan.ProfileVersion, PlanDigest: plan.Digest, Plan: cloneExecutionPlan(&plan),
+				Status: status, StartedAt: model.Timestamp(at), FinishedAt: model.Timestamp(at), FailureCode: code,
+				OutputPreview: &ExecutionOutputPreview{Stdout: strings.Repeat(`"`, maxExecutionOutputPreviewBytes), Stderr: strings.Repeat(`\`, maxExecutionOutputPreviewBytes)},
+			})
+		}
+		executed, err := store.newReceipt(request, model.DecisionExecuted, strings.Repeat(`"`, 254), plan, now.Add(time.Duration(maxExecutionAttempts)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		record.Receipts = append(record.Receipts, Delivery{Receipt: executed})
+		state.Requests[request.ID] = record
+	}
+	if err := store.commit(state); err != nil {
+		t.Fatalf("maximum trusted state exceeded the atomic state-file ceiling: %v", err)
+	}
+	raw := trustedStateBytes(t, store.path)
+	if len(raw) > 14<<20 || !bytes.Contains(raw, []byte(`\"`)) || !bytes.Contains(raw, []byte(`\\`)) {
+		t.Fatalf("maximum trusted state lacked worst-case JSON escaping headroom: bytes=%d", len(raw))
+	}
+	t.Logf("maximum trusted worst-case escaped state bytes=%d", len(raw))
+	if err := store.Ingest(maximalTrustedRequest(t, now, "req_0123456789abcdefghij")); err == nil || !strings.Contains(err.Error(), "store is full") {
+		t.Fatalf("trusted count cap did not bind before state-file bytes: %v", err)
+	}
+	restarted, err := NewStore(filepath.Dir(store.path), privateKey, trustedTestCapabilities(), store.requestMaxTTL, store.receiptTTL, *store.execution)
+	if err != nil {
+		t.Fatalf("maximum trusted state did not restart: %v", err)
+	}
+	if len(restarted.state.Requests) != maxTrustedRequests {
+		t.Fatalf("maximum trusted state restart count=%d want=%d", len(restarted.state.Requests), maxTrustedRequests)
+	}
+}
+
+func maximalTrustedRequest(t *testing.T, now time.Time, id string) model.Request {
+	t.Helper()
+	request := currentCommandRequest(t, now, id, maximalControlArgv())
+	request.Reason = strings.Repeat(`"`, model.MaxReasonBytes)
+	if err := model.SetRequestDigest(&request); err != nil {
+		t.Fatal(err)
+	}
+	return request
 }
 
 func TestCancellationAndCompletionPersistenceNeverClaimExecuted(t *testing.T) {
@@ -287,7 +527,7 @@ func TestCancellationAndCompletionPersistenceNeverClaimExecuted(t *testing.T) {
 	runner.release = make(chan struct{})
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := store.Execute(cancelled, request.ID, "reviewer@example.invalid"); !errors.Is(err, ErrExecutionUncertain) {
+	if err := store.Execute(cancelled, request.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, request.ID)); !errors.Is(err, ErrExecutionUncertain) {
 		t.Fatalf("cancelled execute=%v", err)
 	}
 	record, _, _ := store.Record(request.ID)
@@ -314,7 +554,7 @@ func TestCancellationAndCompletionPersistenceNeverClaimExecuted(t *testing.T) {
 		}
 		return statefile.Save(path, value)
 	}
-	if err := store.Execute(context.Background(), second.ID, "reviewer@example.invalid"); !errors.Is(err, ErrExecutionUncertain) {
+	if err := store.Execute(context.Background(), second.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, second.ID)); !errors.Is(err, ErrExecutionUncertain) {
 		t.Fatalf("completion persistence result=%v", err)
 	}
 	record, _, _ = store.Record(second.ID)
@@ -344,7 +584,7 @@ func TestCancellationAndCompletionPersistenceNeverClaimExecuted(t *testing.T) {
 		}
 		return nil
 	}
-	if err := store.Execute(context.Background(), third.ID, "reviewer@example.invalid"); !errors.Is(err, ErrExecutionUncertain) {
+	if err := store.Execute(context.Background(), third.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, third.ID)); !errors.Is(err, ErrExecutionUncertain) {
 		t.Fatalf("post-rename completion result=%v", err)
 	}
 	record, _, _ = store.Record(third.ID)
@@ -358,6 +598,60 @@ func TestCancellationAndCompletionPersistenceNeverClaimExecuted(t *testing.T) {
 	durableRecord := durable.Requests[third.ID]
 	if durableRecord.State != attemptStatusUncertain || len(durableRecord.Receipts) != 1 {
 		t.Fatalf("post-rename fallback was not durable: %#v", durableRecord)
+	}
+}
+
+func TestExecutionClockRollbackWritesReloadableMonotonicState(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now().UTC().Truncate(time.Second)
+	store, runner := trustedTestStore(t, privateKey, startedAt)
+	request := trustedTestRequest(t, startedAt)
+	if err := store.Ingest(request); err != nil {
+		t.Fatal(err)
+	}
+
+	var clockMu sync.RWMutex
+	current := startedAt
+	store.now = func() time.Time {
+		clockMu.RLock()
+		defer clockMu.RUnlock()
+		return current
+	}
+	release := make(chan struct{})
+	runner.release = release
+	done := make(chan error, 1)
+	go func() {
+		done <- store.Execute(context.Background(), request.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, request.ID))
+	}()
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not begin")
+	}
+	clockMu.Lock()
+	current = startedAt.Add(-90 * time.Second)
+	clockMu.Unlock()
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("execution after backwards clock step: %v", err)
+	}
+
+	record, _, found := store.Record(request.ID)
+	if !found || record.State != model.DecisionExecuted || len(record.Attempts) != 1 || len(record.Receipts) != 2 {
+		t.Fatalf("terminal record after clock step: found=%v record=%#v", found, record)
+	}
+	attemptStarted, _ := time.Parse(time.RFC3339, record.Attempts[0].StartedAt)
+	attemptFinished, _ := time.Parse(time.RFC3339, record.Attempts[0].FinishedAt)
+	approvalCreated, _ := time.Parse(time.RFC3339, record.Receipts[0].Receipt.CreatedAt)
+	executedCreated, _ := time.Parse(time.RFC3339, record.Receipts[1].Receipt.CreatedAt)
+	if attemptFinished.Before(attemptStarted) || executedCreated.Before(approvalCreated) || !attemptFinished.Equal(executedCreated) {
+		t.Fatalf("clock rollback inverted durable events: attempt=%s..%s receipts=%s..%s", attemptStarted, attemptFinished, approvalCreated, executedCreated)
+	}
+	if _, err := NewStore(filepath.Dir(store.path), privateKey, trustedTestCapabilities(), store.requestMaxTTL, store.receiptTTL, *store.execution); err != nil {
+		t.Fatalf("trusted store refused its own clock-rollback state: %v", err)
 	}
 }
 
@@ -377,7 +671,9 @@ func TestActionServiceOwnsExecutionAfterFrontendDisconnect(t *testing.T) {
 	runner.release = release
 	frontend, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- service.Execute(frontend, request.ID, "reviewer@example.invalid") }()
+	go func() {
+		done <- service.Execute(frontend, request.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, request.ID), true)
+	}()
 	select {
 	case <-runner.started:
 	case <-time.After(time.Second):
@@ -397,6 +693,31 @@ func TestActionServiceOwnsExecutionAfterFrontendDisconnect(t *testing.T) {
 	}
 }
 
+func TestActionServiceRequiresExplicitFullAuthorityConfirmation(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	store, runner := trustedTestStore(t, privateKey, now)
+	request := trustedTestRequest(t, now)
+	if err := store.Ingest(request); err != nil {
+		t.Fatal(err)
+	}
+	service := NewActionService(store)
+	digest := trustedPlanDigest(t, store, request.ID)
+	if err := service.Execute(context.Background(), request.ID, "reviewer@example.invalid", digest, false); !errors.Is(err, ErrExecutionConfirmationRequired) {
+		t.Fatalf("missing confirmation error=%v", err)
+	}
+	if runner.Calls() != 0 {
+		t.Fatal("unconfirmed action reached provider")
+	}
+	record, _, found := service.Record(request.ID)
+	if !found || record.State != "pending" || len(record.Attempts) != 0 || len(record.Receipts) != 0 {
+		t.Fatalf("unconfirmed action mutated durable state: %#v", record)
+	}
+}
+
 func TestActionServiceShutdownCancelsAndPersistsInFlightExecution(t *testing.T) {
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -411,7 +732,9 @@ func TestActionServiceShutdownCancelsAndPersistsInFlightExecution(t *testing.T) 
 	service := NewActionService(store)
 	runner.release = make(chan struct{})
 	done := make(chan error, 1)
-	go func() { done <- service.Execute(context.Background(), request.ID, "reviewer@example.invalid") }()
+	go func() {
+		done <- service.Execute(context.Background(), request.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, request.ID), true)
+	}()
 	select {
 	case <-runner.started:
 	case <-time.After(time.Second):
@@ -429,7 +752,7 @@ func TestActionServiceShutdownCancelsAndPersistsInFlightExecution(t *testing.T) 
 	if !found || record.State != attemptStatusUncertain || len(record.Attempts) != 1 || record.Attempts[0].FailureCode != "cancelled" {
 		t.Fatalf("shutdown did not persist cancelled uncertainty: %#v", record)
 	}
-	if err := service.Execute(context.Background(), request.ID, "reviewer@example.invalid"); !errors.Is(err, ErrExecutionUnavailable) {
+	if err := service.Execute(context.Background(), request.ID, "reviewer@example.invalid", strings.Repeat("a", 64), true); !errors.Is(err, ErrExecutionUnavailable) {
 		t.Fatalf("execute after shutdown=%v", err)
 	}
 	if err := service.Shutdown(context.Background()); err != nil {
@@ -453,7 +776,9 @@ func TestActionServiceShutdownRespectsDeadline(t *testing.T) {
 	runner.release = release
 	runner.ignoreCancellation = true
 	done := make(chan error, 1)
-	go func() { done <- service.Execute(context.Background(), request.ID, "reviewer@example.invalid") }()
+	go func() {
+		done <- service.Execute(context.Background(), request.ID, "reviewer@example.invalid", trustedPlanDigest(t, store, request.ID), true)
+	}()
 	select {
 	case <-runner.started:
 	case <-time.After(time.Second):
@@ -486,7 +811,7 @@ func TestGitHubConfigDirectoryMustBePrivateAndReal(t *testing.T) {
 		if err := os.Chmod(stateDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		_, err := NewStore(stateDir, privateKey, trustedTestCapabilities(), 15*time.Minute, time.Hour, ExecutionConfig{GitHubCLIPath: "/trusted/fake/gh", GitHubConfigDir: configDir, Timeout: time.Minute})
+		_, err := NewStore(stateDir, privateKey, trustedTestCapabilities(), 15*time.Minute, time.Hour, trustedTestExecutionConfig(configDir))
 		return err
 	}
 	root := t.TempDir()
@@ -494,11 +819,11 @@ func TestGitHubConfigDirectoryMustBePrivateAndReal(t *testing.T) {
 		t.Fatal(err)
 	}
 	missing := filepath.Join(root, "missing")
-	if err := newStore(missing); err != nil {
-		t.Fatalf("missing private directory was not created: %v", err)
+	if err := newStore(missing); err == nil {
+		t.Fatal("missing GitHub config directory was accepted without a private hosts.yml")
 	}
-	if info, err := os.Lstat(missing); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
-		t.Fatalf("created GitHub config directory mode=%v err=%v", info.Mode(), err)
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("startup created an unauthenticated GitHub config directory: %v", err)
 	}
 
 	regular := filepath.Join(root, "regular")
@@ -533,6 +858,150 @@ func TestGitHubConfigDirectoryMustBePrivateAndReal(t *testing.T) {
 	}
 }
 
+func TestSyncerPagesPendingBacklogWithoutWholeResponseFailure(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	requesterDir := t.TempDir()
+	if err := os.Chmod(requesterDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	requesterStore, err := requester.NewStore(requesterDir, publicKey, 15*time.Minute, time.Hour, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedStore, _ := trustedTestStore(t, privateKey, now)
+	syncer := NewSyncer(trustedStore, privateKey, trustedTestCapabilities(), "http://requester.invalid", time.Second, time.Hour)
+	syncer.client.Transport = directTransport{handler: requester.NewServer(requesterStore).Handler()}
+	syncer.now = func() time.Time { return now }
+	if err := syncer.SyncOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < maxPullPageRecords+3; index++ {
+		if _, err := requesterStore.Create(requester.CreateInput{
+			ProfileID: model.ProfileGitHubCommandID, ProfileVersion: model.ProfileGitHubCommandVersion,
+			Argv: []string{"api", fmt.Sprintf("repos/example-owner/project-%02d", index)}, Reason: "paged pending backlog", TTLSeconds: 600,
+		}); err != nil {
+			t.Fatalf("create backlog request %d: %v", index, err)
+		}
+	}
+	if err := syncer.SyncOnce(t.Context()); err != nil {
+		t.Fatalf("first pending page: %v", err)
+	}
+	if got := len(trustedStore.state.Requests); got != maxPullPageRecords || syncer.pullCursor == "" {
+		t.Fatalf("first pending page count=%d cursor=%q", got, syncer.pullCursor)
+	}
+	if err := syncer.SyncOnce(t.Context()); err != nil {
+		t.Fatalf("second pending page: %v", err)
+	}
+	if got := len(trustedStore.state.Requests); got != maxPullPageRecords+3 || syncer.pullCursor != "" {
+		t.Fatalf("completed pending pagination count=%d cursor=%q", got, syncer.pullCursor)
+	}
+}
+
+func TestSyncerAdvancesPastEnvelopeRejectedRecord(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	store, _ := trustedTestStore(t, privateKey, now)
+	requests := pendingSyncRequests(t, now, maxPullPageRecords)
+	requests[0].ExpiresAt = model.Timestamp(now.Add(30 * time.Minute))
+	if err := model.SetRequestDigest(&requests[0]); err != nil {
+		t.Fatal(err)
+	}
+	nextCursor, err := paging.CursorFor(paging.Key{ID: requests[len(requests)-1].ID, CreatedAt: now.Add(-time.Duration(len(requests)-1) * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncer := NewSyncer(store, privateKey, trustedTestCapabilities(), "http://requester.invalid", time.Second, time.Hour)
+	syncer.now = func() time.Time { return now }
+	syncer.client.Transport = directTransport{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(struct {
+			Requests   []model.Request `json:"requests"`
+			NextCursor string          `json:"next_cursor,omitempty"`
+		}{Requests: requests, NextCursor: nextCursor})
+	})}
+	if err := syncer.pullRequests(t.Context()); err == nil || !strings.Contains(err.Error(), "failed local validation") {
+		t.Fatalf("page with one envelope rejection error=%v", err)
+	}
+	if syncer.pullCursor != nextCursor || syncer.pullPages != 1 || len(store.state.Requests) != maxPullPageRecords-1 {
+		t.Fatalf("envelope rejection stalled page: cursor=%q pages=%d records=%d", syncer.pullCursor, syncer.pullPages, len(store.state.Requests))
+	}
+}
+
+func TestSyncerRejectsInvalidPendingPagesWithoutAdvancing(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	store, _ := trustedTestStore(t, privateKey, now)
+	requests := pendingSyncRequests(t, now, maxPullPageRecords)
+	lastCursor, err := paging.CursorFor(paging.Key{ID: requests[len(requests)-1].ID, CreatedAt: now.Add(-time.Duration(len(requests)-1) * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	olderCursor, err := paging.CursorFor(paging.Key{ID: "req_00000000000000009999", CreatedAt: now.Add(-time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	malformed := requests[0]
+	malformed.CreatedAt = "not-a-timestamp"
+	for name, test := range map[string]struct {
+		page   []model.Request
+		next   string
+		cursor string
+		pages  int
+	}{
+		"empty nonterminal": {nil, lastCursor, "", 0},
+		"short nonterminal": {requests[:1], lastCursor, "", 0},
+		"mismatched cursor": {requests, olderCursor, "", 0},
+		"nonforward cycle":  {requests, lastCursor, lastCursor, 1},
+		"oversized":         {append(append([]model.Request(nil), requests...), requests[0]), "", "", 0},
+		"malformed":         {[]model.Request{malformed}, "", "", 0},
+		"pagination bound":  {requests, lastCursor, "", maxPullPages - 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			syncer := NewSyncer(store, privateKey, trustedTestCapabilities(), "http://requester.invalid", time.Second, time.Hour)
+			syncer.now = func() time.Time { return now }
+			syncer.pullCursor, syncer.pullPages = test.cursor, test.pages
+			syncer.client.Transport = directTransport{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/v1/pending-requests" {
+					t.Fatalf("unexpected path %q", r.URL.Path)
+				}
+				_ = json.NewEncoder(w).Encode(struct {
+					Requests   []model.Request `json:"requests"`
+					NextCursor string          `json:"next_cursor,omitempty"`
+				}{Requests: test.page, NextCursor: test.next})
+			})}
+			if err := syncer.pullRequests(t.Context()); err == nil {
+				t.Fatal("invalid pending page accepted")
+			}
+			if syncer.pullCursor != test.cursor || syncer.pullPages != test.pages || len(store.state.Requests) != 0 {
+				t.Fatalf("invalid page advanced or ingested: cursor=%q pages=%d records=%d", syncer.pullCursor, syncer.pullPages, len(store.state.Requests))
+			}
+		})
+	}
+}
+
+func pendingSyncRequests(t *testing.T, now time.Time, count int) []model.Request {
+	t.Helper()
+	requests := make([]model.Request, count)
+	for index := range requests {
+		request := trustedTestRequest(t, now.Add(-time.Duration(index)*time.Second))
+		request.ID = fmt.Sprintf("req_%020d", index)
+		if err := model.SetRequestDigest(&request); err != nil {
+			t.Fatal(err)
+		}
+		requests[index] = request
+	}
+	return requests
+}
+
 func TestV2ReceiptsSyncAndLegacyV1RecoveryRemainVisible(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -554,14 +1023,14 @@ func TestV2ReceiptsSyncAndLegacyV1RecoveryRemainVisible(t *testing.T) {
 	if err := syncer.SyncOnce(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	record, err := requesterStore.Create(requester.CreateInput{CapabilityID: "github:example-owner", Action: model.ActionGitHubAddCollaborator, Arguments: map[string]string{"repository": "project", "permission": "push"}, Reason: "Enable bounded contribution", TTLSeconds: 600})
+	record, err := requesterStore.Create(requester.CreateInput{ProfileID: model.ProfileGitHubCommandID, ProfileVersion: model.ProfileGitHubCommandVersion, Argv: []string{"api", "repos/example-owner/project"}, Reason: "Enable bounded contribution", TTLSeconds: 600})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := syncer.SyncOnce(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := trustedStore.Execute(context.Background(), record.Request.ID, "reviewer@example.invalid"); err != nil {
+	if err := trustedStore.Execute(context.Background(), record.Request.ID, "reviewer@example.invalid", trustedPlanDigest(t, trustedStore, record.Request.ID)); err != nil {
 		t.Fatal(err)
 	}
 	if err := syncer.SyncOnce(t.Context()); err != nil {
@@ -598,19 +1067,108 @@ func TestV2ReceiptsSyncAndLegacyV1RecoveryRemainVisible(t *testing.T) {
 	}
 }
 
+func TestTrustedOutputPreviewNeverCrossesRequesterReceiptAPIUIOrMCPBoundary(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	requesterDir := t.TempDir()
+	if err := os.Chmod(requesterDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	requesterStore, err := requester.NewStore(requesterDir, publicKey, 15*time.Minute, time.Hour, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("local IPv4 loopback is unavailable for requester/MCP boundary proof: %v", err)
+	}
+	requesterHTTP := httptest.NewUnstartedServer(requester.NewServer(requesterStore).Handler())
+	requesterHTTP.Listener = listener
+	requesterHTTP.Start()
+	defer requesterHTTP.Close()
+	trustedStore, runner := trustedTestStore(t, privateKey, now)
+	runner.preview = ExecutionOutputPreview{Stdout: "trusted-preview " + testOutputCredential, Stderr: "stderr " + testOutputCredential}
+	syncer := NewSyncer(trustedStore, privateKey, trustedTestCapabilities(), requesterHTTP.URL, time.Second, time.Hour)
+	syncer.now = func() time.Time { return now }
+	if err := syncer.SyncOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	created, err := requesterStore.Create(requester.CreateInput{ProfileID: model.ProfileGitHubCommandID, ProfileVersion: model.ProfileGitHubCommandVersion, Argv: []string{"api", "user"}, Reason: "bounded output boundary", TTLSeconds: 600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncer.SyncOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := trustedStore.Execute(context.Background(), created.Request.ID, "reviewer@example.invalid", trustedPlanDigest(t, trustedStore, created.Request.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncer.SyncOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if record, found := requesterStore.Record(created.Request.ID); !found || strings.Contains(mustJSON(t, record), testOutputCredential) {
+		t.Fatalf("trusted output crossed requester state: found=%v record=%#v", found, record)
+	}
+	for _, target := range []string{"/api/v1/requests/" + created.Request.ID, "/"} {
+		response, err := http.Get(requesterHTTP.URL + target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, readErr := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if readErr != nil || strings.Contains(string(body), testOutputCredential) {
+			t.Fatalf("trusted output crossed requester %s: %v %q", target, readErr, body)
+		}
+	}
+	requesterClient, err := requester.NewClient(requesterHTTP.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"airlock_requests","arguments":{}}}` + "\n"
+	var mcpOutput bytes.Buffer
+	if err := mcp.New(requesterClient).Serve(strings.NewReader(request), &mcpOutput); err != nil || strings.Contains(mcpOutput.String(), testOutputCredential) {
+		t.Fatalf("trusted output crossed MCP: err=%v output=%q", err, mcpOutput.String())
+	}
+	runner.err = errors.New("provider " + testOutputCredential)
+	second := trustedTestRequest(t, now)
+	second.ID = "req_0123456789abcdefghik"
+	if err := model.SetRequestDigest(&second); err != nil {
+		t.Fatal(err)
+	}
+	if err := trustedStore.Ingest(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := trustedStore.Execute(context.Background(), second.ID, "reviewer@example.invalid", trustedPlanDigest(t, trustedStore, second.ID)); !errors.Is(err, ErrExecutionUncertain) || strings.Contains(err.Error(), testOutputCredential) {
+		t.Fatalf("trusted execution error exposed provider output: %v", err)
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
+
 type recordingRunner struct {
 	mu                 sync.Mutex
 	calls              int
 	plan               ExecutionPlan
 	env                []string
 	err                error
+	preview            ExecutionOutputPreview
 	started            chan struct{}
 	release            <-chan struct{}
 	onRun              func()
 	ignoreCancellation bool
 }
 
-func (r *recordingRunner) Run(ctx context.Context, plan ExecutionPlan, environment []string) error {
+func (r *recordingRunner) Run(ctx context.Context, plan ExecutionPlan, environment []string) (ExecutionOutputPreview, error) {
 	r.mu.Lock()
 	r.calls++
 	r.plan = plan
@@ -618,6 +1176,7 @@ func (r *recordingRunner) Run(ctx context.Context, plan ExecutionPlan, environme
 	started := r.started
 	release := r.release
 	err := r.err
+	preview := r.preview
 	onRun := r.onRun
 	ignoreCancellation := r.ignoreCancellation
 	r.mu.Unlock()
@@ -631,15 +1190,15 @@ func (r *recordingRunner) Run(ctx context.Context, plan ExecutionPlan, environme
 	if release != nil {
 		if ignoreCancellation {
 			<-release
-			return err
+			return preview, err
 		}
 		select {
 		case <-release:
 		case <-ctx.Done():
-			return ctx.Err()
+			return preview, ctx.Err()
 		}
 	}
-	return err
+	return preview, err
 }
 
 func (r *recordingRunner) Calls() int { r.mu.Lock(); defer r.mu.Unlock(); return r.calls }
@@ -651,7 +1210,13 @@ func trustedTestStore(t *testing.T, privateKey ed25519.PrivateKey, now time.Time
 		t.Fatal(err)
 	}
 	configDir := filepath.Join(dir, "gh-config")
-	store, err := NewStore(dir, privateKey, trustedTestCapabilities(), 15*time.Minute, time.Hour, ExecutionConfig{GitHubCLIPath: "/trusted/fake/gh", GitHubConfigDir: configDir, Timeout: time.Minute})
+	if err := os.Mkdir(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "hosts.yml"), []byte("github.example.invalid:\n  user: test-only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(dir, privateKey, trustedTestCapabilities(), 15*time.Minute, time.Hour, trustedTestExecutionConfig(configDir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +1245,7 @@ func trustedTestCapabilities() []config.TrustedCapability {
 
 func trustedTestRequest(t *testing.T, now time.Time) model.Request {
 	t.Helper()
-	request := model.Request{Version: model.RequestVersion, ID: "req_0123456789abcdefghij", CapabilityID: "github:example-owner", Action: model.ActionGitHubAddCollaborator, Arguments: map[string]string{"repository": "project", "permission": "push"}, Reason: "Enable a bounded contribution", CreatedAt: model.Timestamp(now), ExpiresAt: model.Timestamp(now.Add(10 * time.Minute)), Nonce: "0123456789abcdefghijklmnopqrstuv"}
+	request := model.Request{Version: model.RequestVersionV1, ID: "req_0123456789abcdefghij", CapabilityID: "github:example-owner", Action: model.ActionGitHubAddCollaborator, Arguments: map[string]string{"repository": "project", "permission": "push"}, Reason: "Enable a bounded contribution", CreatedAt: model.Timestamp(now), ExpiresAt: model.Timestamp(now.Add(10 * time.Minute)), Nonce: "0123456789abcdefghijklmnopqrstuv"}
 	if err := model.SetRequestDigest(&request); err != nil {
 		t.Fatal(err)
 	}
@@ -751,4 +1316,19 @@ func filepathDir(path string) string {
 		}
 	}
 	return "."
+}
+
+func trustedTestExecutionConfig(configDir string) ExecutionConfig {
+	return ExecutionConfig{GitHubCLIPath: "/trusted/fake/gh", GitHubConfigDir: configDir, SandboxCLIPath: "/usr/bin/bwrap", ExecutableSHA256: strings.Repeat("a", 64), Timeout: time.Minute, Profile: model.CommandProfile{ID: model.ProfileGitHubCommandID, Version: model.ProfileGitHubCommandVersion, DisplayName: "GitHub CLI command", AuthorityLabel: "Broad GitHub authority", SandboxLabel: "Ephemeral local state", NetworkLabel: "GitHub network", CWDLabel: "Ephemeral directory", OutputLabel: "Bounded sanitized trusted-local output preview", Limits: model.ProfileLimits{MaxArgvCount: model.MaxArgvCount, MaxArgumentBytes: model.MaxArgumentBytes, MaxAggregateBytes: model.MaxArgvAggregateBytes}}, ProfileConfigVersion: "test-v1", ExecutionIdentity: "trusted test identity", sandboxLauncherDigestForTest: strings.Repeat("b", 64)}
+}
+
+func trustedPlanDigest(t *testing.T, store *Store, id string) string {
+	t.Helper()
+	_, plan, found := store.Record(id)
+	if !found || plan == nil {
+		record, _, _ := store.Record(id)
+		_, resolveErr := resolveExecutionPlan(record.Request, store.capabilities, actionTime(record.Request), store.requestMaxTTL, store.execution)
+		t.Fatalf("resolved plan unavailable for %s: %v", id, resolveErr)
+	}
+	return plan.Digest
 }

@@ -71,6 +71,12 @@ def test_create_schema_preserves_historical_v1_verification_path():
     assert "independent read-only verification" in description
 
 
+def test_create_schema_advertises_client_enforced_size_limits():
+    fields = schemas.AIRLOCK_CREATE_REQUEST["parameters"]["properties"]
+    assert fields["reason"]["maxLength"] == 512
+    assert "32768" in fields["argv"]["description"]
+
+
 def test_handler_returns_bounded_json_error_when_service_is_down(monkeypatch):
     def unavailable(_client):
         raise AirlockError(
@@ -119,9 +125,11 @@ def test_model_facing_conformance_and_backpressure_guards():
         schemas.AIRLOCK_REQUESTS,
     )
 
-    assert set(manifest["provides_tools"]) == set(context.tools) == {
-        schema["name"] for schema in declared_schemas
-    }
+    assert (
+        set(manifest["provides_tools"])
+        == set(context.tools)
+        == {schema["name"] for schema in declared_schemas}
+    )
     assert "hooks" not in manifest
     assert "register_hook" not in inspect.getsource(register)
     assert not list(root.glob("hooks"))
@@ -138,5 +146,11 @@ def test_model_facing_conformance_and_backpressure_guards():
     model_text = "\n".join(
         [skill_text, *(schema["description"] for schema in declared_schemas)]
     ).lower()
-    unsafe_tokens = (r"https?://", r"\$\(", r"`\s*(?:curl|gh|sudo)\b", r"\b(?:curl|gh|sudo)\s+")
+    unsafe_tokens = (
+        r"https?://",
+        r"\$\(",
+        r"`\s*(?:curl|sudo)\b",
+        r"\b(?:curl|sudo)\s+",
+        r"`\s*gh\s+(?:api|auth|repo|pr|workflow|release)\b",
+    )
     assert not any(re.search(token, model_text) for token in unsafe_tokens)

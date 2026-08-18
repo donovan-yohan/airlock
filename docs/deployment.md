@@ -37,11 +37,85 @@ directory. Create each state directory with mode `0700`; Airlock refuses a
 group- or world-accessible state directory and writes state files with mode
 `0600`.
 
-The trusted configuration must name an absolute `github_cli_path`, an isolated
-owner-private real `0700` `github_config_dir`, a bounded `execution_timeout`,
-and `control_socket`. The daemon creates a missing GitHub config directory with
-mode `0700` and refuses a symlink, non-directory, or group- or world-accessible
-directory. Do not inspect or log its credential contents.
+The trusted configuration must name absolute `github_cli_path` and
+`sandbox_cli_path` (`/usr/bin/bwrap` in the example), an isolated
+owner-private real `0700` canonical `github_config_dir`, a bounded
+`execution_timeout`, a monotonic `profile_config_version`, bounded human-readable
+authority/identity/sandbox/network/cwd/output labels, and `control_socket`. The
+daemon binds regular non-symlink executable content and a root-owned UID 0,
+non-writable canonical sandbox-launcher identity (including each path parent)
+into every resolved-plan digest. The configured `sandbox_cli_path` is the
+canonical launcher path the kernel executes; it is never copied into an
+invocation directory. Airlock hashes and verifies that canonical path again
+immediately before reservation. A root/admin replacement is therefore part of
+the documented trusted-filesystem TCB, but an unexpected replacement fails the
+approved path-and-digest binding closed. Do not inspect or log credential
+contents.
+
+Authenticate the canonical GitHub config before starting Airlock. The shipped
+trusted systemd unit makes home read-only and permits writes only below the
+trusted state directory, so it cannot create or authenticate this sibling
+GitHub configuration directory for you. Pre-create and authenticate it as the
+dedicated trusted account before enabling the unit:
+
+```sh
+install -d -m 0700 "$HOME/.local/state/airlock/gh-config"
+GH_CONFIG_DIR="$HOME/.local/state/airlock/gh-config" /usr/local/bin/gh auth login
+chmod 700 "$HOME/.local/state/airlock/gh-config"
+chmod 600 "$HOME/.local/state/airlock/gh-config/hosts.yml"
+```
+
+Use the configured static `gh` path in place of `/usr/local/bin/gh` if you
+installed it elsewhere. Airlock accepts only one private regular bounded
+`hosts.yml`; aliases, extensions, and other persistent GitHub CLI configuration
+are excluded. Its secret-safe content identity is reviewed, then an opened
+no-follow descriptor is copied and hashed before durable reservation. The
+static `gh` executable is likewise copied into the private invocation; bwrap is
+not copied, so Ubuntu's path-keyed launcher policy remains applicable.
+
+Bubblewrap creates fresh user, mount, PID, IPC, UTS, and cgroup namespaces and
+dies with its parent. The host must permit unprivileged user namespaces. Verify
+that requirement with the actual canonical launcher before deploying:
+
+```sh
+/usr/bin/bwrap --version
+/usr/bin/bwrap --unshare-user --unshare-pid --die-with-parent \
+  --ro-bind / / --proc /proc --dev /dev -- /bin/true
+```
+
+Use the configured `sandbox_cli_path` if it is not `/usr/bin/bwrap`. On Ubuntu
+24.04 and later, AppArmor can restrict unprivileged user namespaces through a
+path-keyed `bwrap-userns-restrict` policy. Keep `bwrap` installed at the
+root-owned canonical path configured above; executing a user-owned copied
+launcher can lose that path grant. Run this operator preflight before enabling
+the service. Airlock verifies launcher identity at startup and again before
+reservation, but it does not claim that those checks prove the host will permit
+user namespaces. A later namespace denial can occur only after approval is
+durably reserved and is recorded conservatively rather than launching an
+unconfined provider command.
+
+The supported `gh` is statically linked: the sandbox mounts the pinned
+executable, invocation work directory, read-only minimal auth snapshot, and
+only CA/DNS runtime files. It never mounts broad `/usr`, `/bin`, `/lib`, or
+`/etc` trees. Signing state, all canonical config, control sockets, operator
+home, and unrelated credentials are absent. GitHub network access shares the
+host network; it is not an egress firewall and host loopback may be reachable
+from the sandbox.
+
+Install `gh` from the official [GitHub CLI release artifacts](https://cli.github.com/)
+for the target architecture, verify the published release checksum, and place
+the extracted binary at the configured path. Distribution packages are often
+dynamically linked and are not automatically suitable. Check the exact file
+before starting Airlock:
+
+```sh
+file "$(command -v gh)" # must report a static Linux ELF / statically linked executable
+```
+
+Airlock independently verifies that the configured `github_cli_path` is a
+supported static Linux ELF before it can enter a plan. A dynamically linked
+replacement is rejected rather than gaining broad library mounts or failing
+after approval.
 
 Relative directory and socket paths resolve from the trusted config file. The
 socket must be a direct child of the trusted state directory. The daemon creates it
@@ -73,12 +147,18 @@ share that account with unrelated services:
 ```sh
 airlock trusted requests list --config "$HOME/.config/airlock/trusted.json" [--cursor CURSOR]
 airlock trusted request show --config "$HOME/.config/airlock/trusted.json" --id REQUEST_ID
-airlock trusted request execute --config "$HOME/.config/airlock/trusted.json" --id REQUEST_ID
+airlock trusted request execute --config "$HOME/.config/airlock/trusted.json" --id REQUEST_ID --plan-digest SHA256_FROM_SHOW --confirm-full-authority
 airlock trusted request deny --config "$HOME/.config/airlock/trusted.json" --id REQUEST_ID
 ```
 
-The local-control list response contains at most four sanitized records and an optional
+The local-control list response contains at most one sanitized record and an optional
 `next_cursor`; pass it as `--cursor` to retrieve the next page.
+
+The web reviewer must also tick the adjacent unchecked full-authority
+confirmation after reading the exact plan. The control socket accepts only the
+strict JSON pair `plan_digest` plus `confirm_full_authority: true`; a raw
+same-UID control caller cannot substitute a digest-only request. These are
+additional confirmations, not semantic safety guarantees.
 
 Linux peer credentials are the local CLI authorization boundary. Airlock derives
 the CLI reviewer identity from the daemon's Unix UID; the client cannot send a
@@ -91,21 +171,34 @@ The example systemd user units assume state under
 use `systemctl --user enable --now ...`. Do not put credentials in a unit,
 config, environment file, or catalog.
 
+Both user-unit examples intentionally omit `PrivateDevices=` and
+`CapabilityBoundingSet=`. An unprivileged user manager can fail before
+`ExecStart` with `218/CAPABILITIES` while applying either directive. Bubblewrap
+still creates the provider child's private `/dev`; both dedicated unprivileged
+accounts retain `NoNewPrivileges=yes` and their role-specific namespace and
+syscall restrictions. After installation, verify that both services actually
+start and run one disposable fake-provider execution on the trusted node;
+`systemd-analyze verify` checks syntax only.
+
 ## State retention and rotation
 
-The requester keeps at most 4,096 requests. The trusted store keeps at most
-1,024 requests and four bounded execution attempts per request, keeping its
-worst-case JSON below the shared atomic state-file ceiling. A full store rejects
-new work but continues receipt delivery for existing records. Expired records
-remain only through the latest window in which a timely receipt could still be
-delivered, then are pruned.
+The requester keeps at most 192 requests. The trusted store keeps at most
+28 requests and four bounded execution attempts per request. Those caps are
+tested with quote/backslash-heavy values that maximize printable JSON escaping,
+keeping complete request, receipt, attempt, and preview histories below the
+shared atomic state-file ceiling. Trusted polling advances through bounded
+cursor pages instead of requiring one whole backlog response. A full store
+rejects new work but continues receipt delivery for existing records. Expired
+records remain only through the latest window in which a timely receipt could
+still be delivered, then are pruned.
 
-On restart, records that no longer validate under tightened TTL bounds or the
-configured trusted public key are removed instead of crash-looping the service.
-Rotating the trusted key also removes the old signed catalog and any records
-whose receipts were signed by the prior key. Back up the state file first when
-its audit history must be retained outside Airlock. Malformed JSON and unsafe
-state-file permissions still fail startup rather than being silently repaired.
+Current TTL and capability limits govern new admissions, not historical signed
+records. Restart uses stable protocol-envelope bounds to retain completed,
+running, uncertain, and legacy history even after a TTL tightening or legacy
+capability removal; a historical pending record that current policy no longer
+allows remains preserved but is not actionable. A malformed, corrupt, or
+signature-invalid state record—including after key rotation—fails startup with
+the state bytes unchanged rather than deleting or rewriting audit history.
 
 ## Tailscale Serve and ACL intent
 
@@ -137,25 +230,48 @@ proxy would break the identity-header trust contract. `--dev` disables the
 Tailscale header and instead requires `X-Airlock-Dev-Identity`; use it only for
 local smoke/testing.
 
-## Trusted execution semantics and rollout
+## Command profiles, trusted execution, and rollout
 
-`approved_for_execution` is durably signed and paired with a local `running`
-attempt before the configured absolute `gh` is started. The child receives a
-fixed minimal environment, including only the isolated `GH_CONFIG_DIR`,
-noninteractive/no-color settings, safe HOME/locale, and fixed PATH; inherited
-tokens, proxies, and home configuration are not supplied. It is direct
-`os/exec`, never shell parsing.
+The signed catalog advertises `github.command/v1` with argv limits and the
+trusted-local authority/sandbox/network/cwd/output labels. The requester may
+propose any ordered argv supported by `gh`; adding an operation does not require
+another Airlock adapter. It cannot select any trusted execution setting.
+`shell.run/v1` is reserved but is not advertised and cannot execute until a
+reviewed sandbox contract exists.
+
+Before approval, web and CLI `show` render the profile/version, request and plan
+digests, expiry/reason, every argv element distinctly, executable path and
+content identity, fixed labels/policies, timeout/output policy, and suspicious
+GitHub-shape warnings. The escaped command line is convenience text only. The
+operator cannot edit it: deny and resubmit. The CLI `execute` must return the
+exact plan digest from a fresh `show`; a config or executable change fails
+closed.
+
+`approved_for_execution` is durably signed and paired with the immutable
+resolved plan and a local `running` attempt before the configured absolute `gh`
+is started. The child receives a fixed minimal environment, including only its
+fresh `GH_CONFIG_DIR`/`HOME`, noninteractive/no-color values, fixed locale, and
+the reserved executable directory in `PATH`; ambient token, proxy, PATH, and
+home configuration are not inherited. It is direct `os/exec`, never shell
+parsing. Shell metacharacters are ordinary argv data.
+
+Raw stdout and stderr never cross to receipts, requester state/API, MCP,
+Hermes, ordinary logs, or agent-facing errors. The trusted review page alone
+shows a small local-only preview after execution; it is UTF-8-normalized,
+control/ANSI/invisible-character escaped, credential-redacted, and marked when
+truncated or redacted. It is reviewer assistance only, not provider-state
+proof. Child environment, provider bodies, credentials, and trusted config
+paths likewise never cross to requester-facing state.
 
 `executed` is emitted only after a zero exit and atomic completion persistence.
 It does not prove GitHub state; independently read provider state. A missing
 executable or other proven pre-invocation start failure is recorded as `failed`
 and can be retried. A timeout, cancellation, interrupted daemon, generic
 non-zero exit, expired completion, or completion-write failure is `uncertain`:
-GitHub might already have accepted the collaborator PUT. No ambiguous outcome
+GitHub might already have accepted an operation. No ambiguous outcome
 emits `executed`. A fresh explicit web or CLI retry is required after read-only
-verification as appropriate. The GitHub endpoint documents `201` for a new
-invitation and `204` for existing access; Airlock does not treat that as a
-formal duplicate-invitation retry guarantee.
+verification as appropriate. Airlock makes no operation-specific idempotence
+claim.
 
 After approval and the `running` reservation persist, a web or local-control
 disconnect does not revoke daemon-owned execution. During daemon shutdown,
@@ -163,8 +279,72 @@ Airlock stops admitting executes, cancels active children, and waits within its
 bounded shutdown deadline for their terminal persistence. A canceled child is
 recorded as `uncertain` with `cancelled`; it never produces `executed`.
 
-Upgrade requester integrations first, then the trusted node. Older requester
-versions reject `airlock.receipt/v2` and its new decisions. Both upgraded nodes
-retain read/validation/recovery for v1 `approved_for_manual_execution` and
-`manually_executed` history. Receipts and attempts intentionally omit output,
-environment, provider body, credentials, and free-form command text.
+Upgrade requester integrations first, then the trusted node. Current creation
+requires `airlock.catalog/v2` and fails closed against an old catalog. Current
+execution emits `airlock.receipt/v3`, which binds the profile/version and plan
+digest. Both nodes retain exact read/validation/recovery for historical
+`airlock.request/v1`, manual `airlock.receipt/v1`, execution
+`airlock.receipt/v2`, and prior durable state without reinterpreting their
+bytes under command semantics.
+
+## Command-broker upgrade and rollback boundary
+
+Old PR #2 binaries use strict state/config decoding and cannot read current
+command records in place. A binary-only downgrade is unsupported. Before
+upgrading, stop both services and make one complete checkpoint of both
+compatible configs and both state files; restore that exact checkpoint together
+with the matching old binaries if rollback is required:
+
+```sh
+scripts/command-broker-rollback.sh snapshot \
+  --confirm-services-stopped \
+  --requester-config "$HOME/.config/airlock/requester.json" \
+  --trusted-config "$HOME/.config/airlock/trusted.json" \
+  --requester-state "$HOME/.local/state/airlock/requester/requester-state.json" \
+  --trusted-state "$HOME/.local/state/airlock/trusted/trusted-state.json" \
+  --directory "$HOME/.local/state/airlock/pre-command-broker-checkpoint"
+
+# Stop current services, then restore every file before starting old binaries.
+scripts/command-broker-rollback.sh restore \
+  --confirm-services-stopped \
+  --requester-config "$HOME/.config/airlock/requester.json" \
+  --trusted-config "$HOME/.config/airlock/trusted.json" \
+  --requester-state "$HOME/.local/state/airlock/requester/requester-state.json" \
+  --trusted-state "$HOME/.local/state/airlock/trusted/trusted-state.json" \
+  --directory "$HOME/.local/state/airlock/pre-command-broker-checkpoint"
+```
+
+`--confirm-services-stopped` is an operator interlock required for both actions;
+it acknowledges that both services are stopped. It is not a claim that the
+script can perfectly detect every running process. Every path argument must be
+clean and absolute. The script walks every ancestor to the source, checkpoint,
+and target mutation parent: no symlink, sticky, group-writable, or
+world-writable component is accepted. Root-owned non-writable system ancestors
+such as `/` and `/home`, and euid-owned read/search-only anchors such as a
+conventional `0755` home directory, are accepted only because they cannot be
+renamed by another user; every mutation parent and file remains euid-owned and
+has no group/other permission bits. Restore also refuses duplicate target paths
+or existing targets that alias the same inode. Its manifest must contain exactly
+one lowercase SHA-256 line for each fixed checkpoint name, with no extra,
+missing, or duplicate entry. Restore stages and validates all four files before
+replacing any target, then uses private pre-restore backups to attempt
+in-process recovery if a later replacement fails.
+
+Each target replacement is an atomic rename within its own parent directory and
+is synced, but the four targets can be in different directories. The complete
+restore is therefore **not crash-atomic across directories**: power loss or a
+kill between replacements can leave a mixed set. Keep services stopped, retain
+the checkpoint, inspect a failed restore, and recover from the retained private
+backups before restarting either service. It does not project command records:
+those records are intentionally omitted from an old binary only by restoring the
+pre-upgrade state snapshot. Current nodes read legacy v1 manual/v2 execution
+receipts and legacy requests; a current requester with a legacy trusted catalog
+fails closed for command creation, and an old trusted node cannot consume a
+current command request. Restore compatible config and full state together,
+never just the binary.
+
+`github.command/v1` carries broad GitHub credential authority. Its risk labels
+are reviewer assistance, not an allowlist. Approval is reviewer-approved RCE;
+fresh config/cwd and Linux process-group cancellation reduce persistence and
+cleanup risk but do not make the approved operation semantically safe or
+prevent every abuse available to the credential and service identity.

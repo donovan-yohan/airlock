@@ -15,7 +15,7 @@ AIRLOCK_CAPABILITIES = {
 AIRLOCK_CREATE_REQUEST = {
     "name": "airlock_create_request",
     "description": (
-        "Create a typed Airlock request for human review on the trusted node. Use this "
+        "Propose exact GitHub CLI argv for human review on the trusted node. Use this "
         "instead of searching for, requesting, or bypassing credentials unavailable to "
         "the current harness. This queues a request only: it does not grant authority or "
         "execute the action. Call airlock_capabilities first, report the returned request "
@@ -26,26 +26,26 @@ AIRLOCK_CREATE_REQUEST = {
     "parameters": {
         "type": "object",
         "properties": {
-            "capability_id": {
+            "profile_id": {
                 "type": "string",
-                "description": "Exact capability id returned by airlock_capabilities",
+                "enum": ["github.command"],
+                "description": "Exact profile id returned by airlock_capabilities",
             },
-            "action": {
+            "profile_version": {
                 "type": "string",
-                "enum": ["github.repo.add_collaborator"],
-                "description": "Exact typed action advertised by the capability",
+                "enum": ["v1"],
+                "description": "Exact advertised profile version",
             },
-            "repository": {
-                "type": "string",
-                "description": "GitHub repository name only, without owner or URL",
-            },
-            "permission": {
-                "type": "string",
-                "enum": ["pull", "push"],
-                "description": "Requested collaborator permission",
+            "argv": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "description": "Exact ordered gh argv elements; the UTF-8 aggregate must not exceed 32768 bytes. Shell metacharacters remain data. Do not include credentials, authorization headers, tokens, or URL userinfo.",
             },
             "reason": {
                 "type": "string",
+                "maxLength": 512,
                 "description": "Concrete human-readable reason for the authority request",
             },
             "ttl_seconds": {
@@ -56,7 +56,7 @@ AIRLOCK_CREATE_REQUEST = {
                 "description": "Request lifetime; the requester may enforce a lower maximum",
             },
         },
-        "required": ["capability_id", "action", "repository", "permission", "reason"],
+        "required": ["profile_id", "profile_version", "argv", "reason"],
         "additionalProperties": False,
     },
 }
@@ -67,7 +67,7 @@ AIRLOCK_REQUESTS = {
         "Read Airlock request state and trusted receipts. Pass request_id for one request, "
         "or omit it to list recent requests. Records include expires_at and derived expired; "
         "expired records are not current authority. approved_for_execution means the trusted "
-        "reviewer authorized a locally reconstructed attempt; it is not external proof. executed "
+        "reviewer authorized one exact resolved-plan digest; it is not external proof. executed "
         "only attests that the trusted child process returned success and still requires independent verification."
     ),
     "parameters": {
@@ -79,7 +79,14 @@ AIRLOCK_REQUESTS = {
             },
             "state": {
                 "type": "string",
-                "enum": ["pending", "approved", "approved_for_execution", "denied", "manually_executed", "executed"],
+                "enum": [
+                    "pending",
+                    "approved",
+                    "approved_for_execution",
+                    "denied",
+                    "manually_executed",
+                    "executed",
+                ],
                 "description": "Optional state filter when listing recent requests",
             },
             "limit": {

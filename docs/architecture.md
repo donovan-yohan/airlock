@@ -1,6 +1,6 @@
 # Airlock architecture diagrams
 
-These diagrams describe the cross-harness package in this repository and the wider Airlock system it connects to. The package remains on the untrusted requester node: it provides awareness and typed create/observe tools, not credentials, approval, or execution authority.
+These diagrams describe Airlock's two-node, credential-isolated approval boundary. The cross-harness package remains on the untrusted requester node: it proposes exact `github.command/v1` argv and observes sanitized state, but holds no credentials, approval, or execution authority.
 
 The dedicated approval timeline is in [`approval-timing.md`](approval-timing.md). Raw Mermaid sources live in [`diagrams/`](diagrams/) and are kept byte-for-byte aligned with the fenced diagrams below.
 
@@ -15,15 +15,15 @@ flowchart TB
     Awareness["Native plugin or shared skill<br/>awareness only"]
     MCP["airlock mcp<br/>typed stdio server"]
     Requester["Requester service<br/>127.0.0.1:8787"]
-    RequestState[("Immutable requester state<br/>typed requests + sanitized receipts")]
+    RequestState[("Immutable requester state<br/>exact proposals + sanitized receipts")]
   end
 
   subgraph T["Trusted node"]
     direction LR
     Trusted["Trusted Airlock service"]
-    Adapter["Versioned local adapters<br/>and constraints"]
-    Review["Human review UI<br/>locally reconstructed action"]
-    TrustedState[("Trusted decision state")]
+    Profile["Trusted local github.command/v1 profile<br/>executable identity + fixed policy"]
+    Review["Human review UI<br/>exact proposal + resolved plan"]
+    TrustedState[("Signed approval + immutable plan<br/>one active attempt")]
   end
 
   Human["Human reviewer / operator"]
@@ -34,21 +34,21 @@ flowchart TB
   Awareness -->|"adds bounded usage guidance"| Harness
   Harness -->|"calls exactly three typed tools"| MCP
   MCP -->|"sends loopback HTTP JSON"| Requester
-  Requester -->|"persists immutable typed request"| RequestState
+  Requester -->|"persists profile, ordered argv, digest, expiry"| RequestState
   Trusted -->|"pulls pending requests"| Requester
-  Requester -->|"returns typed request and signed catalog data"| Trusted
-  Trusted -->|"checks local adapter and constraints"| Adapter
-  Trusted -->|"renders a locally reconstructed action"| Review
-  Human -->|"approves or denies exact direct-exec plan"| Review
-  Review -->|"persists trusted decision"| TrustedState
-  Review -->|"direct exec configured gh after durable reservation"| Provider
+  Requester -->|"returns hostile proposal and signed catalog data"| Trusted
+  Trusted -->|"resolves only trusted execution settings"| Profile
+  Profile -->|"produces digest-bound immutable plan"| Review
+  Human -->|"approves or denies exact resolved plan"| Review
+  Review -->|"persists approval and plan before effect"| TrustedState
+  TrustedState -->|"pinned gh + hosts.yml; Bubblewrap; trusted-only preview"| Provider
   Trusted -->|"publishes sanitized signed receipt"| Requester
   Harness -->|"polls sanitized request state"| MCP
   Verify -->|"reads ordinary external state"| Provider
   Verify -->|"reports observed effect"| User
 ```
 
-**What this shows:** credentials and executable provider actions stay outside the untrusted node. The requester stores typed requests and sanitized receipts; the trusted service revalidates them against local adapters, and a human approves its one direct action. Even an `executed` receipt is followed by an independent read-only verification path.
+**What this shows:** requester argv is executable content, but it cannot execute on the requester. Trusted-local configuration resolves all authority-bearing settings, and a human approves one exact request/plan digest before Airlock stages the matching opened executable and `hosts.yml` snapshots, revalidates the root-owned canonical Bubblewrap launcher, persists the reservation, and invokes the pinned `gh` copy through that launcher. Bubblewrap confines filesystem/process access but deliberately shares network (including host loopback): this is not an egress firewall. Trusted-only bounded sanitized previews do not make a broad credentialed command semantically safe. An `executed` receipt does not prove provider state; it is followed by independent read-only verification.
 
 ## Installation and ownership topology
 
@@ -132,8 +132,10 @@ flowchart LR
 
 ## Non-goals visible in the diagrams
 
-- No generic shell runner or requester-supplied command execution.
+- No enabled generic shell runner. `shell.run/v1` remains disabled until a reviewed sandbox contract exists.
+- Requester-proposed `github.command/v1` argv becomes executable only as the exact human-approved resolved plan; no shell parses it.
 - No trusted credentials, approval tokens, or provider execution URLs cross to the requester node.
 - No hook automatically converts another tool failure into an Airlock request.
-- `approved_for_execution` is not provider execution, and `executed` is not independent proof of the external effect. Historical v1 manual receipts remain readable.
+- Risk warnings assist review but do not create an operation allowlist. Approved broad credentialed commands are reviewer-approved RCE.
+- `approved_for_execution` is not provider execution, and `executed` is not independent proof of the external effect. Historical v1 requests and v1/v2 receipts remain readable.
 - The cross-harness package does not install the native Hermes plugin; it verifies that prerequisite before enabling its prompt section.

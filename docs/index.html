@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Airlock lets untrusted AI agents request narrow authority without receiving credentials or execution access.">
+  <meta name="description" content="Airlock brokers exact human-approved command plans without giving untrusted AI agents credentials or execution access.">
   <title>Airlock — authority without handing agents the keys</title>
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/styles.css">
@@ -29,9 +29,9 @@
   <main id="main">
     <section class="shell hero">
       <div>
-        <p class="eyebrow">typed authority requests · human execution</p>
+        <p class="eyebrow">two-node command proposals · exact-plan approval</p>
         <h1>Authority without handing agents the keys.</h1>
-        <p class="lede">Airlock gives untrusted AI agents a narrow way to ask for privileged work. A trusted node validates the request. A human decides. A human executes. Credentials never cross the boundary.</p>
+        <p class="lede">Airlock lets an untrusted agent propose exact <code>gh</code> argv without giving it credentials or an execution path. A trusted node resolves local policy. A human approves one immutable plan. Credentials never cross the boundary.</p>
         <div class="hero-actions">
           <a class="button primary" href="getting-started.html">Install the integrations</a>
           <a class="button" href="approval-timing.html">See the approval path</a>
@@ -47,12 +47,12 @@
         <div class="flow-stack">
           <div class="flow-step">
             <span class="step-number">01</span>
-            <div><strong>Agent requests</strong><span>exact typed capability fields</span></div>
+            <div><strong>Agent requests</strong><span>exact github.command/v1 argv</span></div>
             <span class="flow-arrow" aria-hidden="true">↓</span>
           </div>
           <div class="flow-step">
             <span class="step-number">02</span>
-            <div><strong>Trusted node validates</strong><span>local adapter, constraints, expiry</span></div>
+            <div><strong>Trusted node validates</strong><span>digest, profile, expiry, executable identity</span></div>
             <span class="flow-arrow" aria-hidden="true">↓</span>
           </div>
         </div>
@@ -60,12 +60,12 @@
         <div class="flow-stack">
           <div class="flow-step human-gate">
             <span class="step-number">03</span>
-            <div><strong>Human reviews</strong><span>approve or reject reconstructed action</span></div>
+            <div><strong>Human reviews</strong><span>distinct argv, exact plan digest, risks</span></div>
             <span class="flow-arrow" aria-hidden="true">↓</span>
           </div>
           <div class="flow-step human-gate">
             <span class="step-number">04</span>
-            <div><strong>Trusted node executes</strong><span>direct argv after persisted human approval</span></div>
+            <div><strong>Trusted node executes</strong><span>pinned argv in Bubblewrap with private snapshots</span></div>
             <span class="flow-arrow" aria-hidden="true">↓</span>
           </div>
           <div class="flow-step">
@@ -82,20 +82,20 @@
         <div class="section-intro">
           <div>
             <p class="kicker">The boundary</p>
-            <h2>Requests can cross. Authority cannot.</h2>
+            <h2>Proposals can cross. Authority cannot.</h2>
           </div>
-          <p>The requester side can discover signed capabilities, submit bounded typed requests, and read sanitized receipts. It cannot receive trusted credentials, approval tokens, provider execution URLs, or requester-supplied shell access.</p>
+          <p>The requester side can discover signed profiles, submit bounded executable argv proposals, and read sanitized receipts. It cannot receive trusted credentials, approval tokens, executable/config paths, child output, or an execution endpoint.</p>
         </div>
         <div class="card-grid">
           <article class="card">
             <span class="card-icon" aria-hidden="true">{ }</span>
-            <h3>Typed, not arbitrary</h3>
-            <p>Each capability has a strict schema and local trusted adapter. There is no generic command field hiding under a nicer name.</p>
+            <h3>Exact plan, not a DSL</h3>
+            <p><code>github.command/v1</code> supports arbitrary <code>gh</code> operations. The trusted profile—not requester data—supplies every authority-bearing execution setting.</p>
           </article>
           <article class="card">
             <span class="card-icon" aria-hidden="true">H</span>
-            <h3>Human at both gates</h3>
-            <p>A reviewer grants or rejects authority. After approval, Airlock directly runs the locally reconstructed configured argv.</p>
+            <h3>Human at the authority gate</h3>
+            <p>A reviewer sees every argv element and one resolved-plan digest. Broad credentialed approval is reviewer-approved RCE, not semantic safety.</p>
           </article>
           <article class="card">
             <span class="card-icon" aria-hidden="true">✓</span>
@@ -111,7 +111,7 @@
         <div class="section-intro">
           <div>
             <p class="kicker">How it works</p>
-            <h2>One narrow path through the wall.</h2>
+            <h2>One exact path through the wall.</h2>
           </div>
           <p>Airlock keeps model-facing integration boring on purpose: three tools, loopback transport, typed state, and no automatic escalation when another tool fails.</p>
         </div>
@@ -122,11 +122,11 @@
           </article>
           <article class="process-step">
             <h3>Request</h3>
-            <p>The agent submits exact typed fields through <code>airlock_create_request</code>. The requester persists an immutable ID, digest, nonce, and bounded expiry.</p>
+            <p>The agent submits the profile/version and ordered argv through <code>airlock_create_request</code>. The requester persists an immutable ID, digest, nonce, and bounded expiry.</p>
           </article>
           <article class="process-step">
             <h3>Review and act</h3>
-            <p>The trusted node revalidates local constraints and renders an exact direct-exec plan. A human reviews it, then Airlock executes it after persisting the reservation.</p>
+            <p>The trusted node resolves its local executable identity and policy into an exact plan. After review, Airlock stages matching opened executable and minimal auth snapshots, revalidates its canonical Bubblewrap launcher, then runs the pinned command. Bounded sanitized output previews stay on trusted review surfaces only.</p>
           </article>
           <article class="process-step">
             <h3>Observe</h3>
@@ -174,7 +174,7 @@
   <footer class="site-footer">
     <div class="shell footer-row">
       <span>Airlock · trusted-execution authority requests</span>
-      <span>Package 0.3.0 · local requester deployment required</span>
+      <span>Package 0.4.0 · local requester deployment required</span>
     </div>
   </footer>
 </body>

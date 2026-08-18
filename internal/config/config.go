@@ -1,8 +1,6 @@
 package config
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/donovan-yohan/airlock/internal/jsonstrict"
 	"github.com/donovan-yohan/airlock/internal/model"
 )
 
@@ -42,20 +41,28 @@ type TrustedCapability struct {
 }
 
 type Trusted struct {
-	Listen           string              `json:"listen"`
-	StateDir         string              `json:"state_dir"`
-	ControlSocket    string              `json:"control_socket"`
-	PrivateKeyFile   string              `json:"private_key_file"`
-	RequesterURL     string              `json:"requester_url"`
-	GitHubCLIPath    string              `json:"github_cli_path"`
-	GitHubConfigDir  string              `json:"github_config_dir"`
-	ExecutionTimeout string              `json:"execution_timeout"`
-	PollInterval     string              `json:"poll_interval"`
-	RequestMaxTTL    string              `json:"request_max_ttl"`
-	CatalogTTL       string              `json:"catalog_ttl"`
-	ReceiptTTL       string              `json:"receipt_ttl"`
-	AllowedLogins    []string            `json:"allowed_logins"`
-	Capabilities     []TrustedCapability `json:"capabilities"`
+	Listen                   string              `json:"listen"`
+	StateDir                 string              `json:"state_dir"`
+	ControlSocket            string              `json:"control_socket"`
+	PrivateKeyFile           string              `json:"private_key_file"`
+	RequesterURL             string              `json:"requester_url"`
+	GitHubCLIPath            string              `json:"github_cli_path"`
+	GitHubConfigDir          string              `json:"github_config_dir"`
+	SandboxCLIPath           string              `json:"sandbox_cli_path"`
+	ExecutionTimeout         string              `json:"execution_timeout"`
+	ProfileConfigVersion     string              `json:"profile_config_version"`
+	CredentialAuthorityLabel string              `json:"credential_authority_label"`
+	ExecutionIdentityLabel   string              `json:"execution_identity_label"`
+	SandboxLabel             string              `json:"sandbox_label"`
+	NetworkLabel             string              `json:"network_label"`
+	CWDLabel                 string              `json:"cwd_label"`
+	OutputLabel              string              `json:"output_label"`
+	PollInterval             string              `json:"poll_interval"`
+	RequestMaxTTL            string              `json:"request_max_ttl"`
+	CatalogTTL               string              `json:"catalog_ttl"`
+	ReceiptTTL               string              `json:"receipt_ttl"`
+	AllowedLogins            []string            `json:"allowed_logins"`
+	Capabilities             []TrustedCapability `json:"capabilities"`
 }
 
 func LoadRequester(path string) (Requester, error) {
@@ -104,9 +111,10 @@ func LoadTrusted(path string) (Trusted, error) {
 	cfg.StateDir = resolvePath(executionBase, cfg.StateDir)
 	cfg.PrivateKeyFile = resolvePath(executionBase, cfg.PrivateKeyFile)
 	cfg.GitHubConfigDir = resolvePath(executionBase, cfg.GitHubConfigDir)
+	cfg.SandboxCLIPath = resolvePath(executionBase, cfg.SandboxCLIPath)
 	cfg.ControlSocket = resolvePath(executionBase, cfg.ControlSocket)
-	if cfg.Listen == "" || cfg.StateDir == "" || cfg.ControlSocket == "" || cfg.PrivateKeyFile == "" || cfg.RequesterURL == "" || cfg.GitHubCLIPath == "" || cfg.GitHubConfigDir == "" || cfg.ExecutionTimeout == "" {
-		return cfg, errors.New("listen, state_dir, control_socket, private_key_file, requester_url, github_cli_path, github_config_dir, and execution_timeout are required")
+	if cfg.Listen == "" || cfg.StateDir == "" || cfg.ControlSocket == "" || cfg.PrivateKeyFile == "" || cfg.RequesterURL == "" || cfg.GitHubCLIPath == "" || cfg.GitHubConfigDir == "" || cfg.SandboxCLIPath == "" || cfg.ExecutionTimeout == "" || cfg.ProfileConfigVersion == "" {
+		return cfg, errors.New("trusted service, execution, and profile_config_version fields are required")
 	}
 	if _, _, _, _, err := cfg.Durations(); err != nil {
 		return cfg, err
@@ -120,6 +128,9 @@ func LoadTrusted(path string) (Trusted, error) {
 	if err := validateTrustedAbsolutePath("github_config_dir", cfg.GitHubConfigDir); err != nil {
 		return cfg, err
 	}
+	if err := validateTrustedAbsolutePath("sandbox_cli_path", cfg.SandboxCLIPath); err != nil {
+		return cfg, err
+	}
 	if err := validateTrustedAbsolutePath("control_socket", cfg.ControlSocket); err != nil {
 		return cfg, err
 	}
@@ -128,6 +139,21 @@ func LoadTrusted(path string) (Trusted, error) {
 	}
 	if _, err := cfg.ExecutionDuration(); err != nil {
 		return cfg, err
+	}
+	if err := validateProfileConfigVersion(cfg.ProfileConfigVersion); err != nil {
+		return cfg, err
+	}
+	for name, value := range map[string]string{
+		"credential_authority_label": cfg.CredentialAuthorityLabel,
+		"execution_identity_label":   cfg.ExecutionIdentityLabel,
+		"sandbox_label":              cfg.SandboxLabel,
+		"network_label":              cfg.NetworkLabel,
+		"cwd_label":                  cfg.CWDLabel,
+		"output_label":               cfg.OutputLabel,
+	} {
+		if err := validateConfigLabel(name, value); err != nil {
+			return cfg, err
+		}
 	}
 	if len(cfg.AllowedLogins) == 0 {
 		return cfg, errors.New("allowed_logins must not be empty")
@@ -145,7 +171,9 @@ func LoadTrusted(path string) (Trusted, error) {
 		}
 		seenLogins[login] = true
 	}
-	if len(cfg.Capabilities) == 0 || len(cfg.Capabilities) > model.MaxCapabilities {
+	// Legacy typed capabilities are optional compatibility data. The current
+	// github.command/v1 profile must not depend on an operation-specific adapter.
+	if len(cfg.Capabilities) > model.MaxCapabilities {
 		return cfg, errors.New("capability count out of bounds")
 	}
 	ids := make([]string, 0, len(cfg.Capabilities))
@@ -222,6 +250,16 @@ func (c TrustedCapability) CatalogCapability() model.Capability {
 	}
 }
 
+func (c Trusted) CatalogProfile() model.CommandProfile {
+	return model.CommandProfile{
+		ID: model.ProfileGitHubCommandID, Version: model.ProfileGitHubCommandVersion,
+		DisplayName: "GitHub CLI command", AuthorityLabel: c.CredentialAuthorityLabel,
+		SandboxLabel: c.SandboxLabel, NetworkLabel: c.NetworkLabel, CWDLabel: c.CWDLabel,
+		OutputLabel: c.OutputLabel,
+		Limits:      model.ProfileLimits{MaxArgvCount: model.MaxArgvCount, MaxArgumentBytes: model.MaxArgumentBytes, MaxAggregateBytes: model.MaxArgvAggregateBytes},
+	}
+}
+
 func load(path string, destination any) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -236,13 +274,8 @@ func load(path string, destination any) error {
 	if len(b) > maxConfigBytes {
 		return errors.New("config file exceeds size limit")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(b))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
+	if err := jsonstrict.DecodeOne(b, destination); err != nil {
 		return fmt.Errorf("decode config: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return errors.New("config must contain one JSON object")
 	}
 	return nil
 }
@@ -270,11 +303,48 @@ func validateTrustedAbsolutePath(name, value string) error {
 		return fmt.Errorf("%s must be a clean non-root absolute path", name)
 	}
 	for _, character := range value {
-		if unicode.IsControl(character) {
+		if unicode.IsControl(character) || unicode.Is(unicode.Cf, character) || isUnicodeNoncharacter(character) {
 			return fmt.Errorf("%s must be a clean non-root absolute path", name)
 		}
 	}
 	return nil
+}
+
+func validateProfileConfigVersion(value string) error {
+	if len(value) > 64 || strings.TrimSpace(value) != value || value == "" {
+		return errors.New("profile_config_version is invalid")
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune("._-", character)) {
+			return errors.New("profile_config_version is invalid")
+		}
+	}
+	return nil
+}
+
+func validateConfigLabel(name, value string) error {
+	if value == "" || len(value) > 200 || !utf8.ValidString(value) || strings.TrimSpace(value) != value {
+		return fmt.Errorf("%s is invalid", name)
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) || character >= 0x7f && character <= 0x9f || isBidirectionalControl(character) || unicode.Is(unicode.Cf, character) || isUnicodeNoncharacter(character) {
+			return fmt.Errorf("%s is invalid", name)
+		}
+	}
+	return nil
+}
+
+func isUnicodeNoncharacter(character rune) bool {
+	return character >= 0xfdd0 && character <= 0xfdef || character <= utf8.MaxRune && character&0xfffe == 0xfffe
+}
+
+func isBidirectionalControl(character rune) bool {
+	switch character {
+	case '\u061c', '\u200e', '\u200f', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069':
+		return true
+	default:
+		return false
+	}
 }
 
 func validateRequesterURL(raw string) error {

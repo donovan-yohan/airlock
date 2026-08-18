@@ -117,7 +117,7 @@ python3 tools/airlock_bootstrap.py uninstall</code></pre>
             <div class="code-title"><span>terminal</span><span>separate Airlock repository</span></div>
             <pre><code>airlock requester serve --config /path/to/requester.json</code></pre>
           </div>
-          <p>Trusted-node deployment, isolated GitHub CLI authentication, adapters, and the reviewer-only direct-execution UI remain separate operational responsibilities. Configure an absolute CLI path, isolated CLI config directory, and bounded timeout; never authenticate through the web UI.</p>
+          <p>Trusted-node deployment and reviewer-only execution remain separate operational responsibilities. Configure the broad <code>github.command/v1</code> profile with an absolute static CLI path, root-owned canonical Bubblewrap launcher, canonical isolated GitHub config, explicit config version and authority/policy labels, and bounded timeout; never authenticate through the web UI. Each approved invocation uses descriptor-pinned private executable/auth snapshots and revalidates the launcher identity before Bubblewrap execution, with bounded sanitized output previews visible only to trusted reviewers. <code>shell.run/v1</code> remains disabled.</p>
         </section>
       </article>
     </div>

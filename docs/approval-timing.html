@@ -28,7 +28,7 @@
       <div class="shell">
         <p class="eyebrow">Human-in-the-loop sequence</p>
         <h1>Approval is persisted before trusted execution.</h1>
-        <p class="lede">Airlock separates request persistence, trusted validation, human approval, direct local execution, bounded failure state, and independent verification.</p>
+        <p class="lede">Airlock separates request persistence, trusted validation, human approval, canonical Bubblewrap execution, bounded failure state, and independent verification.</p>
       </div>
     </header>
 
@@ -45,12 +45,12 @@
         <section id="sequence">
           <p class="kicker">End-to-end timing</p>
           <h2>Where the human enters the loop</h2>
-          <p>The reviewer inspects validated typed fields and the locally reconstructed executable/argv, then chooses Approve and execute or deny. Airlock persists approval plus a running attempt before direct local execution.</p>
+          <p>The reviewer inspects request/plan digests, every proposed argv element, trusted-local policy labels, and risk warnings, then approves that exact plan or denies it. Airlock stages matching opened <code>gh</code> and authentication inputs, revalidates its canonical Bubblewrap launcher, then persists approval, immutable plan, and running attempt before execution.</p>
           <a class="diagram-link" href="assets/diagrams/approval-timing.svg">Open full-size SVG ↗</a>
           <figure class="diagram timing">
-            <img src="assets/diagrams/approval-timing.svg" alt="Sequence diagram showing typed request creation, trusted validation, approval reservation, direct execution, bounded failure state, receipts, and independent verification.">
+            <img src="assets/diagrams/approval-timing.svg" alt="Sequence diagram showing typed request creation, trusted validation, approval reservation, canonical Bubblewrap execution, bounded failure state, receipts, and independent verification.">
           </figure>
-          <div class="notice"><strong>Persist before effect:</strong> an <code>approved_for_execution</code> receipt and running attempt are durable before Airlock invokes the configured absolute CLI.</div>
+          <div class="notice"><strong>Persist before effect:</strong> an <code>approved_for_execution</code> receipt, resolved plan, and running attempt are durable before Airlock invokes the pinned <code>gh</code> copy through its revalidated canonical Bubblewrap launcher.</div>
         </section>
 
         <section id="states">
@@ -59,10 +59,10 @@
           <table>
             <thead><tr><th>State</th><th>What it proves</th><th>What it does not prove</th></tr></thead>
             <tbody>
-              <tr><td><code>pending</code></td><td>The requester persisted a typed request.</td><td>Review, approval, or execution.</td></tr>
-              <tr><td><code>approved_for_execution</code></td><td>A trusted reviewer authorized a persisted execution attempt.</td><td>That the provider action ran or succeeded.</td></tr>
+              <tr><td><code>pending</code></td><td>The requester persisted an exact profile/argv proposal.</td><td>Review, approval, or execution.</td></tr>
+              <tr><td><code>approved_for_execution</code></td><td>A trusted reviewer authorized one persisted plan digest.</td><td>That the provider action ran or succeeded.</td></tr>
               <tr><td><code>denied</code></td><td>The trusted side or reviewer declined the request.</td><td>Any external change.</td></tr>
-              <tr><td><code>executed</code></td><td>The trusted child returned success and terminal state persisted.</td><td>That the provider accepted it or the intended effect exists.</td></tr>
+              <tr><td><code>executed</code></td><td>The trusted child returned success and terminal state persisted.</td><td>It does not prove provider state: whether the provider accepted it or the intended effect exists.</td></tr>
             </tbody>
           </table>
         </section>
@@ -71,11 +71,12 @@
           <p class="kicker">Failure paths</p>
           <h2>Failures stop before authority drifts</h2>
           <ul>
-            <li>Expired, replayed, malformed, or adapter-invalid requests are rejected before human review.</li>
-            <li>A reviewer can reject without exposing credentials or trusted action text to the requester.</li>
+            <li>Expired, replayed, malformed, hostile-text, stale-config, or profile-invalid proposals fail closed.</li>
+            <li>A reviewer can reject without exposing credentials, resolved paths, or child output to the requester.</li>
             <li>Concurrent/replayed POSTs cannot create a second running provider invocation.</li>
             <li>If execution fails or becomes uncertain, no <code>executed</code> receipt is emitted; the reviewer may explicitly retry and verify.</li>
-            <li>Receipts are sanitized and never include a reusable approval or executable command.</li>
+            <li>Bounded stdout/stderr previews are sanitized and credential-redacted for trusted review only; receipts and requester/MCP/Hermes never include them.</li>
+            <li>Bubblewrap confines filesystem/process access to pinned invocation inputs, but network and host loopback remain shared: this is not an egress firewall. Broad approval is reviewer-approved RCE.</li>
             <li>External verification remains independent of the human-entered outcome receipt.</li>
           </ul>
         </section>

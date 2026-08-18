@@ -3,7 +3,6 @@ package trusted
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +17,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/donovan-yohan/airlock/internal/httpjson"
+	"github.com/donovan-yohan/airlock/internal/jsonstrict"
+	"github.com/donovan-yohan/airlock/internal/model"
 	"github.com/donovan-yohan/airlock/internal/paging"
 	"github.com/donovan-yohan/airlock/internal/statefile"
 )
@@ -25,10 +27,13 @@ import (
 const (
 	maxControlBodyBytes  = 1024
 	maxControlQueryBytes = 512
-	maxControlJSONBytes  = 256 << 10
-	// Four full bounded records, including their largest escaped plan paths,
-	// attempt histories, and receipt histories, remain inside maxControlJSONBytes.
-	maxControlPageRecords = 4
+	// 768 KiB contains one maximal request with its current plan, four immutable
+	// attempt plans, four bounded stdout/stderr previews, and receipt history,
+	// including JSON's worst-case printable quote/backslash escaping.
+	// Pages deliberately contain one record; clients enforce the same cap.
+	maxControlJSONBytes = 768 << 10
+	// More records must be obtained through the cursor.
+	maxControlPageRecords = 1
 	controlResponseGrace  = 10 * time.Second
 	maxControlCallTime    = 5*time.Minute + controlResponseGrace
 )
@@ -274,7 +279,8 @@ func (s *ControlServer) request(w http.ResponseWriter, r *http.Request) {
 		controlError(w, http.StatusBadRequest, "query parameters are not allowed")
 		return
 	}
-	if !controlJSONBody(w, r) {
+	planDigest, confirmed, ok := controlJSONBody(w, r, parts[1] == "execute")
+	if !ok {
 		return
 	}
 	if parts[1] == "deny" {
@@ -290,7 +296,7 @@ func (s *ControlServer) request(w http.ResponseWriter, r *http.Request) {
 		controlWrite(w, http.StatusOK, ControlAction{Request: s.sanitize(record), Outcome: "denied"})
 		return
 	}
-	err := s.service.Execute(r.Context(), id, s.reviewer)
+	err := s.service.Execute(r.Context(), id, s.reviewer, planDigest, confirmed)
 	record, _, found := s.service.Record(id)
 	if !found {
 		controlError(w, http.StatusUnprocessableEntity, "execution rejected")
@@ -330,29 +336,35 @@ func controlPageQuery(r *http.Request) (string, bool) {
 
 func controlNoBody(r *http.Request) bool { return r.ContentLength == 0 }
 
-func controlJSONBody(w http.ResponseWriter, r *http.Request) bool {
+func controlJSONBody(w http.ResponseWriter, r *http.Request, requirePlan bool) (string, bool, bool) {
 	if r.ContentLength < 0 || r.ContentLength > maxControlBodyBytes {
 		controlError(w, http.StatusRequestEntityTooLarge, "control request body is too large")
-		return false
+		return "", false, false
 	}
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		controlError(w, http.StatusUnsupportedMediaType, "JSON content type required")
-		return false
+		return "", false, false
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxControlBodyBytes)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	var body struct{}
-	if err := decoder.Decode(&body); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		controlError(w, http.StatusBadRequest, "invalid control request body")
-		return false
+		return "", false, false
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	var body struct {
+		PlanDigest           string `json:"plan_digest"`
+		ConfirmFullAuthority bool   `json:"confirm_full_authority"`
+	}
+	if err := jsonstrict.DecodeOne(raw, &body); err != nil {
 		controlError(w, http.StatusBadRequest, "invalid control request body")
-		return false
+		return "", false, false
 	}
-	return true
+	if (requirePlan && (len(body.PlanDigest) != 64 || !body.ConfirmFullAuthority)) || (!requirePlan && (body.PlanDigest != "" || body.ConfirmFullAuthority)) {
+		controlError(w, http.StatusBadRequest, "invalid control request body")
+		return "", false, false
+	}
+	return body.PlanDigest, body.ConfirmFullAuthority, true
 }
 
 func validControlRequestID(id string) bool {
@@ -368,28 +380,80 @@ func validControlRequestID(id string) bool {
 }
 
 type ControlRequest struct {
-	ID           string            `json:"id"`
-	CapabilityID string            `json:"capability_id"`
-	Action       string            `json:"action"`
-	Arguments    map[string]string `json:"arguments"`
-	Digest       string            `json:"digest"`
-	CreatedAt    string            `json:"created_at"`
-	ExpiresAt    string            `json:"expires_at"`
+	ID             string            `json:"id"`
+	ProfileID      string            `json:"profile_id,omitempty"`
+	ProfileVersion string            `json:"profile_version,omitempty"`
+	Argv           []string          `json:"argv,omitempty"`
+	CapabilityID   string            `json:"capability_id,omitempty"`
+	Action         string            `json:"action,omitempty"`
+	Arguments      map[string]string `json:"arguments,omitempty"`
+	Reason         string            `json:"reason"`
+	Digest         string            `json:"digest"`
+	CreatedAt      string            `json:"created_at"`
+	ExpiresAt      string            `json:"expires_at"`
 }
 
 type ControlPlan struct {
-	Executable string   `json:"executable"`
-	Argv       []string `json:"argv"`
-	Display    string   `json:"display"`
-	Adapter    string   `json:"adapter_version"`
+	ProfileID              string   `json:"profile_id"`
+	ProfileVersion         string   `json:"profile_version"`
+	RequestDigest          string   `json:"request_digest"`
+	PlanDigest             string   `json:"plan_digest"`
+	Executable             string   `json:"executable"`
+	ExecutableSHA256       string   `json:"executable_sha256"`
+	CredentialSourceID     string   `json:"credential_source_id"`
+	SandboxLauncher        string   `json:"sandbox_launcher"`
+	SandboxLauncherSHA256  string   `json:"sandbox_launcher_sha256"`
+	Argv                   []string `json:"argv"`
+	EscapedDisplay         string   `json:"escaped_display,omitempty"`
+	CredentialAuthority    string   `json:"credential_authority"`
+	ExecutionIdentity      string   `json:"execution_identity"`
+	SandboxPolicy          string   `json:"sandbox_policy"`
+	NetworkPolicy          string   `json:"network_policy"`
+	WorkingDirectoryPolicy string   `json:"working_directory_policy"`
+	TimeoutMilliseconds    int64    `json:"timeout_milliseconds"`
+	OutputPolicy           string   `json:"output_policy"`
+	EnvironmentPolicy      []string `json:"environment_policy"`
+	ProfileConfigVersion   string   `json:"profile_config_version"`
+	RiskWarnings           []string `json:"risk_warnings"`
 }
 
 type ControlRecord struct {
-	Request  ControlRequest     `json:"request"`
-	State    string             `json:"state"`
-	Plan     *ControlPlan       `json:"plan,omitempty"`
-	Attempts []ExecutionAttempt `json:"attempts,omitempty"`
-	Receipts []Delivery         `json:"receipts,omitempty"`
+	Request  ControlRequest   `json:"request"`
+	State    string           `json:"state"`
+	Plan     *ControlPlan     `json:"plan,omitempty"`
+	Attempts []ControlAttempt `json:"attempts,omitempty"`
+	Receipts []Delivery       `json:"receipts,omitempty"`
+}
+
+// ControlAttempt carries the persisted, digest-verified immutable plan for
+// its own history entry. ControlRecord.Plan is the current actionable plan
+// until completion, then the final approved plan.
+type ControlAttempt struct {
+	ID             string                `json:"id"`
+	RequestDigest  string                `json:"request_digest"`
+	Reviewer       string                `json:"reviewer"`
+	AdapterVersion string                `json:"adapter_version,omitempty"`
+	ProfileID      string                `json:"profile_id,omitempty"`
+	ProfileVersion string                `json:"profile_version,omitempty"`
+	PlanDigest     string                `json:"plan_digest,omitempty"`
+	Plan           *ControlPlan          `json:"plan,omitempty"`
+	Status         string                `json:"status"`
+	StartedAt      string                `json:"started_at"`
+	FinishedAt     string                `json:"finished_at,omitempty"`
+	FailureCode    string                `json:"failure_code,omitempty"`
+	OutputPreview  *ControlOutputPreview `json:"output_preview,omitempty"`
+}
+
+// ControlOutputPreview is visible only through the same-UID trusted control
+// socket. It is copied only after storage has bounded, escaped, and redacted
+// it; requester, receipt, MCP, and Hermes projections deliberately omit it.
+type ControlOutputPreview struct {
+	LocalOnly       bool   `json:"local_only"`
+	Stdout          string `json:"stdout,omitempty"`
+	Stderr          string `json:"stderr,omitempty"`
+	StdoutTruncated bool   `json:"stdout_truncated,omitempty"`
+	StderrTruncated bool   `json:"stderr_truncated,omitempty"`
+	Redacted        bool   `json:"redacted,omitempty"`
 }
 
 type ControlPage struct {
@@ -404,15 +468,58 @@ type ControlAction struct {
 
 func (s *ControlServer) sanitize(record Record) ControlRecord {
 	result := ControlRecord{
-		Request: ControlRequest{ID: record.Request.ID, CapabilityID: record.Request.CapabilityID, Action: record.Request.Action,
-			Arguments: cloneStringMap(record.Request.Arguments), Digest: record.Request.Digest, CreatedAt: record.Request.CreatedAt, ExpiresAt: record.Request.ExpiresAt},
-		State: record.State, Attempts: append([]ExecutionAttempt(nil), record.Attempts...), Receipts: append([]Delivery(nil), record.Receipts...),
+		Request: ControlRequest{ID: record.Request.ID, ProfileID: record.Request.ProfileID, ProfileVersion: record.Request.ProfileVersion,
+			Argv: append([]string(nil), record.Request.Argv...), CapabilityID: record.Request.CapabilityID, Action: record.Request.Action,
+			Arguments: cloneStringMap(record.Request.Arguments), Reason: record.Request.Reason, Digest: record.Request.Digest, CreatedAt: record.Request.CreatedAt, ExpiresAt: record.Request.ExpiresAt},
+		State: record.State, Attempts: make([]ControlAttempt, 0, len(record.Attempts)), Receipts: append([]Delivery(nil), record.Receipts...),
 	}
-	plan, err := validateAndPlan(record.Request, s.service.store.capabilities, actionTime(record.Request), s.service.store.requestMaxTTL, s.service.store.planExecutable())
-	if err == nil {
-		result.Plan = &ControlPlan{Executable: plan.Executable, Argv: append([]string(nil), plan.Argv...), Display: plan.Display, Adapter: plan.Adapter}
+	for _, attempt := range record.Attempts {
+		var plan *ControlPlan
+		if attempt.Plan != nil && verifyExecutionPlanDigest(*attempt.Plan) == nil && attempt.PlanDigest == attempt.Plan.Digest {
+			plan = controlPlan(*attempt.Plan, false)
+		}
+		result.Attempts = append(result.Attempts, ControlAttempt{
+			ID: attempt.ID, RequestDigest: attempt.RequestDigest, Reviewer: attempt.Reviewer,
+			AdapterVersion: attempt.AdapterVersion, ProfileID: attempt.ProfileID, ProfileVersion: attempt.ProfileVersion,
+			PlanDigest: attempt.PlanDigest, Plan: plan, Status: attempt.Status, StartedAt: attempt.StartedAt,
+			FinishedAt: attempt.FinishedAt, FailureCode: attempt.FailureCode, OutputPreview: controlOutputPreview(attempt.OutputPreview),
+		})
+	}
+	var plan *ExecutionPlan
+	if record.State == attemptStatusRunning || record.State == model.DecisionExecuted {
+		plan, _ = persistedExecutionPlan(record)
+	} else {
+		if current, err := resolveExecutionPlan(record.Request, s.service.store.capabilities, s.service.store.now().UTC(), s.service.store.requestMaxTTL, s.service.store.execution); err == nil {
+			plan = &current
+		}
+	}
+	if plan != nil {
+		result.Plan = controlPlan(*plan, true)
 	}
 	return result
+}
+
+func controlPlan(plan ExecutionPlan, includeDisplay bool) *ControlPlan {
+	display := ""
+	if includeDisplay {
+		display = escapedCommand(plan)
+	}
+	return &ControlPlan{ProfileID: plan.ProfileID, ProfileVersion: plan.ProfileVersion, RequestDigest: plan.RequestDigest,
+		PlanDigest: plan.Digest, Executable: plan.Executable, ExecutableSHA256: plan.ExecutableSHA256,
+		CredentialSourceID: plan.CredentialSourceID, SandboxLauncher: plan.SandboxLauncher, SandboxLauncherSHA256: plan.SandboxLauncherSHA256,
+		Argv: append([]string(nil), plan.Argv...), EscapedDisplay: display, CredentialAuthority: plan.CredentialAuthority,
+		ExecutionIdentity: plan.ExecutionIdentity, SandboxPolicy: plan.SandboxPolicy, NetworkPolicy: plan.NetworkPolicy,
+		WorkingDirectoryPolicy: plan.WorkingDirectoryPolicy, TimeoutMilliseconds: plan.TimeoutMilliseconds,
+		OutputPolicy: plan.OutputPolicy, EnvironmentPolicy: append([]string(nil), plan.EnvironmentPolicy...),
+		ProfileConfigVersion: plan.ProfileConfigVersion, RiskWarnings: classifyGitHubRisk(plan.Argv)}
+}
+
+func controlOutputPreview(preview *ExecutionOutputPreview) *ControlOutputPreview {
+	if preview == nil {
+		return nil
+	}
+	return &ControlOutputPreview{LocalOnly: true, Stdout: preview.Stdout, Stderr: preview.Stderr,
+		StdoutTruncated: preview.StdoutTruncated, StderrTruncated: preview.StderrTruncated, Redacted: preview.Redacted}
 }
 
 func cloneStringMap(source map[string]string) map[string]string {
@@ -424,7 +531,7 @@ func cloneStringMap(source map[string]string) map[string]string {
 }
 
 func controlWrite(w http.ResponseWriter, status int, value any) {
-	encoded, err := json.Marshal(value)
+	encoded, err := httpjson.Marshal(value)
 	if err != nil || len(encoded) > maxControlJSONBytes {
 		status = http.StatusInternalServerError
 		encoded = []byte(`{"error":"trusted control response exceeds size limit"}`)
@@ -491,20 +598,30 @@ func (c *ControlClient) Show(ctx context.Context, id string) (ControlRecord, err
 	return record, c.do(ctx, http.MethodGet, "/v1/requests/"+id, nil, &record)
 }
 
-func (c *ControlClient) Execute(ctx context.Context, id string) (ControlAction, error) {
-	return c.action(ctx, id, "execute")
+func (c *ControlClient) Execute(ctx context.Context, id, planDigest string, confirmFullAuthority bool) (ControlAction, error) {
+	if len(planDigest) != 64 {
+		return ControlAction{}, errors.New("trusted resolved plan digest is invalid")
+	}
+	if !confirmFullAuthority {
+		return ControlAction{}, ErrExecutionConfirmationRequired
+	}
+	return c.action(ctx, id, "execute", planDigest, true)
 }
 
 func (c *ControlClient) Deny(ctx context.Context, id string) (ControlAction, error) {
-	return c.action(ctx, id, "deny")
+	return c.action(ctx, id, "deny", "", false)
 }
 
-func (c *ControlClient) action(ctx context.Context, id, action string) (ControlAction, error) {
+func (c *ControlClient) action(ctx context.Context, id, action, planDigest string, confirmFullAuthority bool) (ControlAction, error) {
 	var result ControlAction
 	if !validControlRequestID(id) {
 		return result, errors.New("trusted control request is invalid")
 	}
-	return result, c.do(ctx, http.MethodPost, "/v1/requests/"+id+"/"+action, bytes.NewReader([]byte("{}")), &result)
+	body := []byte("{}")
+	if planDigest != "" {
+		body, _ = httpjson.Marshal(map[string]any{"plan_digest": planDigest, "confirm_full_authority": confirmFullAuthority})
+	}
+	return result, c.do(ctx, http.MethodPost, "/v1/requests/"+id+"/"+action, bytes.NewReader(body), &result)
 }
 
 func (c *ControlClient) do(ctx context.Context, method, path string, body io.Reader, target any) error {
@@ -526,12 +643,11 @@ func (c *ControlClient) do(ctx context.Context, method, path string, body io.Rea
 	if mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type")); err != nil || mediaType != "application/json" {
 		return errors.New("trusted daemon returned an invalid control response")
 	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, maxControlJSONBytes+1))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
+	raw, err := io.ReadAll(io.LimitReader(response.Body, maxControlJSONBytes+1))
+	if err != nil || len(raw) > maxControlJSONBytes {
 		return errors.New("trusted daemon returned an invalid control response")
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if err := jsonstrict.DecodeOne(raw, target); err != nil {
 		return errors.New("trusted daemon returned an invalid control response")
 	}
 	return nil

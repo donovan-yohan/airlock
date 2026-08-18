@@ -11,17 +11,24 @@ RestartSec=3
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
-PrivateDevices=yes
+# This is a user unit. PrivateDevices= and CapabilityBoundingSet= can require
+# capability setup that an unprivileged user manager cannot perform, failing
+# before ExecStart with 218/CAPABILITIES. Bubblewrap creates the child /dev;
+# the dedicated unprivileged account plus NoNewPrivileges keeps this service
+# from gaining capabilities.
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.local/state/airlock/trusted %h/.local/state/airlock/gh-config
-CapabilityBoundingSet=
+# Canonical gh auth is read-only after operator setup; every invocation gets a
+# private copied hosts.yml instead of a writable canonical configuration.
+ReadWritePaths=%h/.local/state/airlock/trusted
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-RestrictNamespaces=yes
+# Bubblewrap needs these six namespaces. Network remains deliberately shared
+# for GitHub access, so net is not permitted here.
+RestrictNamespaces=cgroup ipc mnt pid user uts
 ProtectProc=invisible
 ProcSubset=pid
 MemoryDenyWriteExecute=yes
-SystemCallFilter=@system-service
+SystemCallFilter=@system-service @mount @process
 SystemCallErrorNumber=EPERM
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

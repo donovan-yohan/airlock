@@ -1,33 +1,22 @@
-# MVP context map
+# Command-broker context map
 
-The Airlock MVP is one Go binary deployed in two roles. The requester owns no
-human credentials. The trusted role owns the signing key and human-side
-adapter policy, initiates all cross-node traffic, and can execute only one
-locally reconstructed GitHub plan after trusted human approval.
+Airlock is one Go binary deployed in two roles. The requester owns no trusted credentials and can only propose or observe. The trusted daemon owns signing, durable decisions, local profile resolution, and execution of one exact human-approved plan.
 
 | Concept | Implementation | Executable evidence |
 | --- | --- | --- |
-| Canonical signed objects | `internal/model` | digest, signature, expiry, mutation, and transition tests |
-| Local configuration and adapter constraints | `internal/config` | strict JSON decoding and model validation |
-| Private keys | `internal/keys` | exclusive creation, strict private-key modes, no-overwrite tests |
-| Atomic durable state | `internal/statefile` | owner-only files, directory and symlink tests |
-| Loopback boundary | `internal/netguard` | default loopback and non-loopback-refusal test |
-| Requester catalog/request/receipt state | `internal/requester` | store lifecycle, bounded request-page, and read-only HTTP/UI tests |
-| Harness-neutral typed MCP bridge | `internal/mcp`, `internal/requester/client.go` | offline initialization/tool registration, strict schemas, loopback transport, and conformance vectors |
-| Trusted GitHub direct-exec adapter and review state | `internal/trusted/adapter.go`, `internal/trusted/store.go`, `internal/trusted/service.go` | exact argv/env, hostile argument, reservation-before-effect, ambiguous-outcome recovery, replay, retry, and receipt-binding tests |
-| Trusted outbound polling | `internal/trusted/sync.go` | in-process v2/v1 receipt compatibility transport test and local smoke |
-| Trusted web UI and local daemon control | `internal/trusted/server.go`, `internal/trusted/control.go` | web identity/CSRF, Unix-socket mode/stale-path, bounded control protocol, shared-executor, and spoof-resistance tests |
-| CLI and process lifecycle | `cmd/airlock` | daemon-only control client, no fallback state/provider access, `go vet`, build through smoke, signal-aware shutdown |
-| Deployment | `configs`, `deploy/systemd`, `docs/deployment.md` | example configs plus local smoke |
+| Canonical v2 catalog/request and v3 receipt objects; legacy bytes | `internal/model` | determinism, mutation, signature, Unicode, size, and legacy-vector tests |
+| Trusted-local profile configuration | `internal/config` | strict unknown-field, path, duration, label, URL, and compatibility-capability validation |
+| Private keys and atomic state | `internal/keys`, `internal/statefile` | exclusive creation, restrictive modes, symlink refusal, atomic persistence tests |
+| Requester catalog/request/receipt state | `internal/requester` | immutable proposals, current-client fail-closed behavior, legacy recovery, bounded pages |
+| Typed model-facing bridge | `internal/mcp`, `internal/requester/client.go` | exact profile/argv schema, strict decoding, sanitized projections, conformance vectors |
+| Plan resolution and pinned execution | `internal/trusted/adapter.go`, `internal/trusted/store.go`, `internal/trusted/source*.go`, `internal/trusted/process_linux.go` | plan-bound source identities, descriptor-pinned `gh`/`hosts.yml`, canonical root-owned Bubblewrap launcher revalidation, exact argv/env, trusted-only bounded output, timeout tests |
+| Durable approval lifecycle | `internal/trusted/store.go`, `internal/trusted/service.go` | request/plan binding, reservation-before-effect, replay, simultaneous frontend, crash/persistence ambiguity tests |
+| Trusted UI and local CLI control | `internal/trusted/server.go`, `internal/trusted/control.go`, `cmd/airlock` | canonical display, risk warnings, plan-digest confirmation, same-EUID socket, bounded responses |
+| Outbound synchronization | `internal/trusted/sync.go` | current and historical signed receipt delivery/recovery tests |
+| Deployment and public surfaces | `configs`, `deploy/systemd`, `docs`, `plugins`, `integrations/hermes` | smoke, bootstrap, docs/diagram, manifest/version, Hermes conformance tests |
 
-The provider boundary is one trusted direct child process. The adapter produces
-an absolute configured `gh` executable plus exact validated argv; `os/exec`
-receives it without shell parsing, PATH lookup, inherited environment, or
-requester executable text. Requester/MCP/Hermes surfaces remain create/observe
-only and never receive executor details.
+The provider boundary is a Bubblewrap-contained direct child process. A current proposal supplies only `github.command/v1`, ordered argv, reason, timestamps, nonce, and ID. Trusted configuration supplies the static executable and SHA-256 identity, authority and policy labels, fixed environment, minimal `hosts.yml` source, bounded timeout, and trusted-only output-preview policy. Airlock stages descriptor-pinned private `gh` and `hosts.yml` copies, and revalidates the root-owned canonical launcher identity immediately before reservation; later path re-resolution is never execution input. Bubblewrap shares network, including host loopback, so it is not an egress firewall.
 
-The trusted daemon is the sole owner of `trusted-state.json`, its lock-free
-in-memory action service, the signing key, receipt delivery, and the configured
-`gh` process. The trusted web UI and the terminal CLI are separate frontends to
-that same service. The CLI uses an owner-private Unix-domain socket and has no
-direct state, signing, or provider capability.
+The daemon is the sole owner of `trusted-state.json`, invocation state, signing key, receipt delivery, and the child. Web and CLI are frontends to the same `ActionService`. The CLI uses an owner-private Unix socket and must echo the plan digest from a fresh `show`; neither frontend can edit a plan.
+
+Requester state retains at most 192 records and trusted state at most 28; these caps include headroom for JSON's worst-case printable escaping and complete receipt/attempt histories. Trusted polling retrieves cursor-bounded pages rather than one all-or-nothing backlog. Same-UID trusted-control list pages expose at most one bounded record. Raw child output, credentials, trusted config paths, and resolved plans never cross to requester/MCP/Hermes.

@@ -28,7 +28,7 @@
       <div class="shell">
         <p class="eyebrow">System diagrams</p>
         <h1>Architecture with the authority boundary left visible.</h1>
-        <p class="lede">The package runs entirely on the untrusted requester side. Trusted policy, credentials, action reconstruction, human review, and direct execution stay across the wall.</p>
+        <p class="lede">The package runs entirely on the untrusted requester side. Trusted policy, credentials, resolved-plan binding, human review, canonical Bubblewrap execution, and trusted-only output previews stay across the wall.</p>
       </div>
     </header>
 
@@ -45,12 +45,12 @@
         <section id="trust-boundary">
           <p class="kicker">01 / trust boundary</p>
           <h2>Runtime topology</h2>
-          <p>The harness, shared skill, MCP process, requester service, and requester state all live on the untrusted node. The trusted service pulls typed requests and independently validates them against versioned local adapters before a human sees a reconstructed action.</p>
+          <p>The harness, shared skill, MCP process, requester service, and requester state all live on the untrusted node. They may propose exact <code>github.command/v1</code> argv but cannot execute it. The trusted service resolves local execution policy and shows a digest-bound immutable plan to a human.</p>
           <a class="diagram-link" href="assets/diagrams/trust-boundary.svg">Open full-size SVG ↗</a>
           <figure class="diagram">
             <img src="assets/diagrams/trust-boundary.svg" alt="Airlock trust boundary showing the untrusted requester node, trusted node, human operator, external provider, and independent verifier.">
           </figure>
-          <div class="notice"><strong>Boundary rule:</strong> credentials, reusable approvals, provider execution URLs, and executable action text never return to the requester side.</div>
+          <div class="notice"><strong>Boundary rule:</strong> proposed argv is requester-visible, but credentials, reusable approvals, resolved executable/config paths, child output, and provider execution URLs never cross to it.</div>
         </section>
 
         <section id="installation">
@@ -79,10 +79,12 @@
           <p class="kicker">04 / non-goals</p>
           <h2>What the architecture refuses to become</h2>
           <ul>
-            <li>No generic shell runner or requester-supplied command execution.</li>
+            <li>No enabled generic shell runner; <code>shell.run/v1</code> stays disabled pending a reviewed sandbox contract.</li>
+            <li>Requester-proposed <code>gh</code> argv executes only as the exact human-approved resolved plan, without a shell.</li>
             <li>No automatic escalation hook when another agent tool fails.</li>
             <li>No direct trusted-node connection from a model harness.</li>
             <li>No interpretation of catalog descriptions as trusted instructions.</li>
+            <li>Bubblewrap confines filesystem/process access but shares network and host loopback: this is not an egress firewall, and it does not make broad credentialed reviewer-approved RCE semantically safe.</li>
             <li>No claim that <code>approved_for_execution</code> or <code>executed</code> proves an external effect.</li>
           </ul>
           <p>For the human decision and execution sequence, continue to the <a href="approval-timing.html">approval timing diagram</a>.</p>

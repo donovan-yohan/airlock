@@ -11,11 +11,13 @@ RestartSec=3
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
-PrivateDevices=yes
+# Capability-changing hardening such as PrivateDevices= and
+# CapabilityBoundingSet= can fail an unprivileged user unit before ExecStart
+# with 218/CAPABILITIES. The dedicated account plus NoNewPrivileges and the
+# remaining namespace/syscall restrictions prevent privilege gain.
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=%h/.local/state/airlock/requester
-CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 ProtectProc=invisible

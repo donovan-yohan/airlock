@@ -14,16 +14,23 @@ import (
 )
 
 const (
-	CatalogVersion = "airlock.catalog/v1"
-	RequestVersion = "airlock.request/v1"
+	CatalogVersionV1 = "airlock.catalog/v1"
+	CatalogVersion   = "airlock.catalog/v2"
+	RequestVersionV1 = "airlock.request/v1"
+	RequestVersion   = "airlock.request/v2"
 	// ReceiptVersion is emitted by the trusted executor. ReceiptVersionV1 is
 	// retained only so requester and trusted recovery can read already-durable
 	// manual-workflow receipts.
 	ReceiptVersionV1 = "airlock.receipt/v1"
-	ReceiptVersion   = "airlock.receipt/v2"
+	ReceiptVersionV2 = "airlock.receipt/v2"
+	ReceiptVersion   = "airlock.receipt/v3"
 
 	ActionGitHubAddCollaborator    = "github.repo.add_collaborator"
 	AdapterGitHubAddCollaboratorV1 = "github.repo.add_collaborator/v1"
+	ProfileGitHubCommandID         = "github.command"
+	ProfileGitHubCommandVersion    = "v1"
+	ProfileShellRunID              = "shell.run"
+	ProfileShellRunVersion         = "v1"
 
 	DecisionApproveForManualExecution = "approved_for_manual_execution"
 	DecisionManuallyExecuted          = "manually_executed"
@@ -32,7 +39,7 @@ const (
 	DecisionDeny                      = "denied"
 
 	// Kept as source compatibility names for callers that construct historical
-	// v1 receipts. New trusted code must use the explicit v2 names above.
+	// v1 receipts. New trusted code must use the explicit execution decision names above.
 	DecisionApprove = DecisionApproveForManualExecution
 	DecisionExecute = DecisionManuallyExecuted
 )
@@ -50,26 +57,50 @@ type Capability struct {
 	Constraints GitHubConstraints `json:"constraints"`
 }
 
+type ProfileLimits struct {
+	MaxArgvCount      int `json:"max_argv_count"`
+	MaxArgumentBytes  int `json:"max_argument_bytes"`
+	MaxAggregateBytes int `json:"max_aggregate_bytes"`
+}
+
+// CommandProfile is signed catalog metadata only. Executable paths,
+// credentials, environment, identity, cwd and timeout remain trusted-local.
+type CommandProfile struct {
+	ID             string        `json:"id"`
+	Version        string        `json:"version"`
+	DisplayName    string        `json:"display_name"`
+	AuthorityLabel string        `json:"authority_label"`
+	SandboxLabel   string        `json:"sandbox_label"`
+	NetworkLabel   string        `json:"network_label"`
+	CWDLabel       string        `json:"cwd_label"`
+	OutputLabel    string        `json:"output_label"`
+	Limits         ProfileLimits `json:"limits"`
+}
+
 type Catalog struct {
-	Version          string       `json:"version"`
-	IssuedAt         string       `json:"issued_at"`
-	ExpiresAt        string       `json:"expires_at"`
-	TrustedPublicKey string       `json:"trusted_public_key"`
-	Capabilities     []Capability `json:"capabilities"`
-	Signature        string       `json:"signature"`
+	Version          string           `json:"version"`
+	IssuedAt         string           `json:"issued_at"`
+	ExpiresAt        string           `json:"expires_at"`
+	TrustedPublicKey string           `json:"trusted_public_key"`
+	Profiles         []CommandProfile `json:"profiles,omitempty"`
+	Capabilities     []Capability     `json:"capabilities,omitempty"`
+	Signature        string           `json:"signature"`
 }
 
 type Request struct {
-	Version      string            `json:"version"`
-	ID           string            `json:"id"`
-	CapabilityID string            `json:"capability_id"`
-	Action       string            `json:"action"`
-	Arguments    map[string]string `json:"arguments"`
-	Reason       string            `json:"reason"`
-	CreatedAt    string            `json:"created_at"`
-	ExpiresAt    string            `json:"expires_at"`
-	Nonce        string            `json:"nonce"`
-	Digest       string            `json:"digest"`
+	Version        string            `json:"version"`
+	ID             string            `json:"id"`
+	ProfileID      string            `json:"profile_id,omitempty"`
+	ProfileVersion string            `json:"profile_version,omitempty"`
+	Argv           []string          `json:"argv,omitempty"`
+	CapabilityID   string            `json:"capability_id,omitempty"`
+	Action         string            `json:"action,omitempty"`
+	Arguments      map[string]string `json:"arguments,omitempty"`
+	Reason         string            `json:"reason"`
+	CreatedAt      string            `json:"created_at"`
+	ExpiresAt      string            `json:"expires_at"`
+	Nonce          string            `json:"nonce"`
+	Digest         string            `json:"digest"`
 }
 
 type Receipt struct {
@@ -79,7 +110,10 @@ type Receipt struct {
 	RequestDigest  string `json:"request_digest"`
 	Decision       string `json:"decision"`
 	Reviewer       string `json:"reviewer"`
-	AdapterVersion string `json:"adapter_version"`
+	AdapterVersion string `json:"adapter_version,omitempty"`
+	ProfileID      string `json:"profile_id,omitempty"`
+	ProfileVersion string `json:"profile_version,omitempty"`
+	PlanDigest     string `json:"plan_digest,omitempty"`
 	CreatedAt      string `json:"created_at"`
 	ExpiresAt      string `json:"expires_at"`
 	Evidence       string `json:"evidence,omitempty"`
@@ -94,6 +128,15 @@ type catalogPayload struct {
 	Capabilities     []Capability `json:"capabilities"`
 }
 
+type catalogPayloadV2 struct {
+	Version          string           `json:"version"`
+	IssuedAt         string           `json:"issued_at"`
+	ExpiresAt        string           `json:"expires_at"`
+	TrustedPublicKey string           `json:"trusted_public_key"`
+	Profiles         []CommandProfile `json:"profiles"`
+	Capabilities     []Capability     `json:"capabilities,omitempty"`
+}
+
 type requestPayload struct {
 	Version      string            `json:"version"`
 	ID           string            `json:"id"`
@@ -104,6 +147,18 @@ type requestPayload struct {
 	CreatedAt    string            `json:"created_at"`
 	ExpiresAt    string            `json:"expires_at"`
 	Nonce        string            `json:"nonce"`
+}
+
+type requestPayloadV2 struct {
+	Version        string   `json:"version"`
+	ID             string   `json:"id"`
+	ProfileID      string   `json:"profile_id"`
+	ProfileVersion string   `json:"profile_version"`
+	Argv           []string `json:"argv"`
+	Reason         string   `json:"reason"`
+	CreatedAt      string   `json:"created_at"`
+	ExpiresAt      string   `json:"expires_at"`
+	Nonce          string   `json:"nonce"`
 }
 
 type receiptPayload struct {
@@ -119,7 +174,27 @@ type receiptPayload struct {
 	Evidence       string `json:"evidence,omitempty"`
 }
 
+type receiptPayloadV3 struct {
+	Version        string `json:"version"`
+	ID             string `json:"id"`
+	RequestID      string `json:"request_id"`
+	RequestDigest  string `json:"request_digest"`
+	Decision       string `json:"decision"`
+	Reviewer       string `json:"reviewer"`
+	ProfileID      string `json:"profile_id"`
+	ProfileVersion string `json:"profile_version"`
+	PlanDigest     string `json:"plan_digest"`
+	CreatedAt      string `json:"created_at"`
+	ExpiresAt      string `json:"expires_at"`
+}
+
 func CatalogSigningBytes(c Catalog) ([]byte, error) {
+	if c.Version == CatalogVersion {
+		return json.Marshal(catalogPayloadV2{
+			Version: c.Version, IssuedAt: c.IssuedAt, ExpiresAt: c.ExpiresAt,
+			TrustedPublicKey: c.TrustedPublicKey, Profiles: c.Profiles, Capabilities: c.Capabilities,
+		})
+	}
 	return json.Marshal(catalogPayload{
 		Version: c.Version, IssuedAt: c.IssuedAt, ExpiresAt: c.ExpiresAt,
 		TrustedPublicKey: c.TrustedPublicKey, Capabilities: c.Capabilities,
@@ -127,6 +202,13 @@ func CatalogSigningBytes(c Catalog) ([]byte, error) {
 }
 
 func RequestSigningBytes(r Request) ([]byte, error) {
+	if r.Version == RequestVersion {
+		return json.Marshal(requestPayloadV2{
+			Version: r.Version, ID: r.ID, ProfileID: r.ProfileID,
+			ProfileVersion: r.ProfileVersion, Argv: r.Argv, Reason: r.Reason,
+			CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt, Nonce: r.Nonce,
+		})
+	}
 	return json.Marshal(requestPayload{
 		Version: r.Version, ID: r.ID, CapabilityID: r.CapabilityID, Action: r.Action,
 		Arguments: r.Arguments, Reason: r.Reason, CreatedAt: r.CreatedAt,
@@ -135,6 +217,14 @@ func RequestSigningBytes(r Request) ([]byte, error) {
 }
 
 func ReceiptSigningBytes(r Receipt) ([]byte, error) {
+	if r.Version == ReceiptVersion {
+		return json.Marshal(receiptPayloadV3{
+			Version: r.Version, ID: r.ID, RequestID: r.RequestID,
+			RequestDigest: r.RequestDigest, Decision: r.Decision, Reviewer: r.Reviewer,
+			ProfileID: r.ProfileID, ProfileVersion: r.ProfileVersion, PlanDigest: r.PlanDigest,
+			CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt,
+		})
+	}
 	return json.Marshal(receiptPayload{
 		Version: r.Version, ID: r.ID, RequestID: r.RequestID,
 		RequestDigest: r.RequestDigest, Decision: r.Decision, Reviewer: r.Reviewer,
@@ -144,6 +234,19 @@ func ReceiptSigningBytes(r Receipt) ([]byte, error) {
 }
 
 func SetRequestDigest(r *Request) error {
+	if r == nil {
+		return errors.New("request is nil")
+	}
+	// Current proposals must be rejected before their bytes are canonicalized
+	// and hashed. Historical v1 recovery remains deliberately byte-compatible.
+	if r.Version == RequestVersion {
+		if err := ValidateArgv(r.Argv); err != nil {
+			return err
+		}
+		if err := ValidateCommandReason(r.Reason); err != nil {
+			return err
+		}
+	}
 	b, err := RequestSigningBytes(*r)
 	if err != nil {
 		return err

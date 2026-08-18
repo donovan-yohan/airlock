@@ -1,9 +1,9 @@
 # Airlock documentation site
 
-This directory is a dependency-free static site suitable for GitHub Pages. It contains three intentionally separate deliverables:
+This directory is a dependency-free static site for Airlock's exact-plan command broker. It describes `github.command/v1`, the disabled `shell.run/v1` placeholder, broad reviewer-approved RCE risk, and the no-unapproved-execution boundary. It contains three intentionally separate deliverables:
 
 - [`architecture.md`](architecture.md) and its raw Mermaid sources describe system boundaries, installation topology, and managed-instruction ownership;
-- [`approval-timing.md`](approval-timing.md) and its raw Mermaid source describe approval, trusted direct execution, receipts, retries, and external verification over time;
+- [`approval-timing.md`](approval-timing.md) and its raw Mermaid source describe approval, canonical Bubblewrap execution, receipts, retries, and external verification over time;
 - [`index.html`](index.html) is the marketing landing page, with additional HTML documentation pages sharing [`assets/styles.css`](assets/styles.css).
 
 ## Render diagrams

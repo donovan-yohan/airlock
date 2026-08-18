@@ -15,9 +15,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.25.x'
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+      - name: Bubblewrap unprivileged-userns preflight
+        run: |
+          bwrap --version
+          bwrap --unshare-user --unshare-pid --proc /proc --dev /dev --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 -- /usr/bin/true
       - run: go test ./...
       - run: go test -race ./...
       - run: go vet ./...
@@ -30,6 +39,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.25.x'
@@ -37,17 +47,30 @@ jobs:
         with:
           python-version: '3.11'
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+      - name: Bubblewrap unprivileged-userns preflight
+        run: |
+          bwrap --version
+          bwrap --unshare-user --unshare-pid --proc /proc --dev /dev --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 -- /usr/bin/true
       - name: Validate Claude and Codex packaging
         run: |
           python3 -m unittest discover -s tests -v
           python3 tools/airlock_bootstrap.py validate
+          git diff --check HEAD^ HEAD
+          systemd-analyze --user verify deploy/systemd/airlock-requester.service
+          systemd-analyze --user verify deploy/systemd/airlock-trusted.service
+          ./docs/diagrams/render.sh
+          git diff --exit-code -- docs/assets/diagrams
       - name: Test Hermes integration
         working-directory: integrations/hermes
         run: |
           uv lock --check
           uv run --locked pytest -q
-          uv run --locked ruff check hermes_plugin_airlock tests
-          uv run --locked python -m compileall -q __init__.py hermes_plugin_airlock tests
+          uv run --locked ruff check hermes_plugin_airlock tests ../../tests
+          uv run --locked python -m compileall -q __init__.py hermes_plugin_airlock tests ../../tests
       - name: Test Hermes integration against the Go service
         run: |
           go build -o /tmp/airlock ./cmd/airlock

@@ -42,7 +42,7 @@ def binary_after_dash():
     return args[args.index("--") + 1:]
 if args[:2] == ["plugins", "show"]:
     if os.environ.get("FAKE_HERMES_PLUGIN_MISSING"): raise SystemExit(1)
-    print("airlock v0.3.0\nStatus: enabled"); raise SystemExit(0)
+    print("airlock v0.4.0\nStatus: enabled"); raise SystemExit(0)
 if args[:2] == ["config", "get"]:
     if os.environ.get("FAKE_HERMES_GET_FAIL"):
         print("forced Hermes config read failure", file=sys.stderr); raise SystemExit(9)
@@ -741,9 +741,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("pointing elsewhere", result.stderr)
         self.bootstrap("install", "--binary", str(self.binary), "--replace")
-        self.assertEqual(
-            self.state()["plugins"]["claude"], {"airlock@airlock": True}
-        )
+        self.assertEqual(self.state()["plugins"]["claude"], {"airlock@airlock": True})
 
     def test_unrelated_airlock_plugin_is_never_treated_as_installer_owned(self) -> None:
         state = {

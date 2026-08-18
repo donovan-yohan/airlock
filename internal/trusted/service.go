@@ -30,7 +30,14 @@ func NewActionService(store *Store) *ActionService {
 // daemon accepts an execution, a web or control disconnect cannot revoke the
 // already reserved action; only daemon shutdown, its deadline, or Store's own
 // outcome handling can end it.
-func (s *ActionService) Execute(_ context.Context, id, reviewer string) error {
+// Execute accepts only an explicit, transport-validated full-authority
+// confirmation. Keeping this check at the shared action boundary prevents a
+// future trusted transport from accidentally turning a plan-digest post into
+// sufficient authority.
+func (s *ActionService) Execute(_ context.Context, id, reviewer, planDigest string, confirmFullAuthority bool) error {
+	if !confirmFullAuthority {
+		return ErrExecutionConfirmationRequired
+	}
 	s.mu.Lock()
 	if s.stopping {
 		s.mu.Unlock()
@@ -41,7 +48,7 @@ func (s *ActionService) Execute(_ context.Context, id, reviewer string) error {
 	s.mu.Unlock()
 
 	defer s.complete()
-	return s.store.Execute(ctx, id, reviewer)
+	return s.store.Execute(ctx, id, reviewer, planDigest)
 }
 
 // Shutdown closes execution admission and cancels every daemon-owned child
@@ -82,7 +89,7 @@ func (s *ActionService) Deny(id, reviewer string) error {
 	return err
 }
 
-func (s *ActionService) Record(id string) (Record, string, bool) { return s.store.Record(id) }
+func (s *ActionService) Record(id string) (Record, *ExecutionPlan, bool) { return s.store.Record(id) }
 
 func (s *ActionService) RecordPage(cursor string) ([]Record, string, error) {
 	return s.store.RecordPage(paging.MaxPage, cursor)

@@ -4,24 +4,32 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/donovan-yohan/airlock/internal/config"
+	"github.com/donovan-yohan/airlock/internal/httpjson"
+	"github.com/donovan-yohan/airlock/internal/jsonstrict"
 	"github.com/donovan-yohan/airlock/internal/model"
 	"github.com/donovan-yohan/airlock/internal/netguard"
+	"github.com/donovan-yohan/airlock/internal/paging"
 )
 
 const (
-	maxSyncResponseBytes = 16 << 20
-	maxPullPerPoll       = 10_000
+	maxSyncResponseBytes = 2 << 20
+	maxPullPageRecords   = 16
+	// Before command requests, requester state admitted up to 4096 compact
+	// legacy records. Keep pagination finite without stranding a valid backlog
+	// that predates the lower current admission cap.
+	maxPersistedPullRecords = 4096
+	maxPullPages            = (maxPersistedPullRecords + maxPullPageRecords - 1) / maxPullPageRecords
 )
 
 type Syncer struct {
@@ -35,6 +43,8 @@ type Syncer struct {
 	client       *http.Client
 	now          func() time.Time
 	catalog      *model.Catalog
+	pullCursor   string
+	pullPages    int
 }
 
 func NewSyncer(store *Store, privateKey ed25519.PrivateKey, capabilities []config.TrustedCapability, requesterURL string, pollInterval, catalogTTL time.Duration) *Syncer {
@@ -94,6 +104,10 @@ func (s *Syncer) publishCatalog(ctx context.Context) error {
 			Version: model.CatalogVersion, IssuedAt: model.Timestamp(now),
 			ExpiresAt: model.Timestamp(now.Add(s.catalogTTL)), Capabilities: capabilities,
 		}
+		if s.store.execution == nil {
+			return errors.New("command profile execution is not configured")
+		}
+		catalog.Profiles = []model.CommandProfile{s.store.execution.Profile}
 		if err := model.SignCatalog(&catalog, s.privateKey); err != nil {
 			return err
 		}
@@ -103,7 +117,11 @@ func (s *Syncer) publishCatalog(ctx context.Context) error {
 }
 
 func (s *Syncer) pullRequests(ctx context.Context) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.requesterURL+"/api/v1/pending-requests", nil)
+	query := url.Values{"limit": []string{fmt.Sprint(maxPullPageRecords)}}
+	if s.pullCursor != "" {
+		query.Set("cursor", s.pullCursor)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.requesterURL+"/api/v1/pending-requests?"+query.Encode(), nil)
 	if err != nil {
 		return err
 	}
@@ -117,22 +135,18 @@ func (s *Syncer) pullRequests(ctx context.Context) error {
 		return fmt.Errorf("requester returned HTTP %d", response.StatusCode)
 	}
 	var payload struct {
-		Requests []model.Request `json:"requests"`
+		Requests   []model.Request `json:"requests"`
+		NextCursor string          `json:"next_cursor,omitempty"`
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxSyncResponseBytes+1))
 	if err != nil || len(body) > maxSyncResponseBytes {
 		return errors.New("requester response exceeds the size limit")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
+	if err := jsonstrict.DecodeOne(body, &payload); err != nil {
 		return errors.New("requester returned invalid request JSON")
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return errors.New("requester returned trailing JSON content")
-	}
-	if len(payload.Requests) > maxPullPerPoll {
-		return errors.New("requester returned too many requests")
+	if err := s.validatePullPage(payload.Requests, payload.NextCursor); err != nil {
+		return errors.New("requester returned an invalid pending request page")
 	}
 	var rejected int
 	for _, request := range payload.Requests {
@@ -140,9 +154,35 @@ func (s *Syncer) pullRequests(ctx context.Context) error {
 			rejected++
 		}
 	}
+	// Advance only after the whole bounded page was decoded and considered.
+	// Rejected records are retried after the cursor completes a full cycle.
+	s.pullCursor = payload.NextCursor
+	if s.pullCursor == "" {
+		s.pullPages = 0
+	} else {
+		s.pullPages++
+	}
 	s.store.sweep()
 	if rejected > 0 {
 		return fmt.Errorf("%d requester records failed local validation", rejected)
+	}
+	return nil
+}
+
+func (s *Syncer) validatePullPage(requests []model.Request, nextCursor string) error {
+	keys := make([]paging.Key, 0, len(requests))
+	for _, request := range requests {
+		createdAt, err := time.Parse(time.RFC3339, request.CreatedAt)
+		if err != nil {
+			return err
+		}
+		keys = append(keys, paging.Key{ID: request.ID, CreatedAt: createdAt})
+	}
+	if err := paging.ValidatePage(keys, maxPullPageRecords, s.pullCursor, nextCursor); err != nil {
+		return err
+	}
+	if nextCursor != "" && s.pullPages+1 >= maxPullPages {
+		return errors.New("requester pending request pagination exceeded its bound")
 	}
 	return nil
 }
@@ -165,7 +205,7 @@ func (s *Syncer) deliverReceipts(ctx context.Context) error {
 }
 
 func (s *Syncer) postJSON(ctx context.Context, path string, value any) error {
-	body, err := json.Marshal(value)
+	body, err := httpjson.Marshal(value)
 	if err != nil {
 		return err
 	}

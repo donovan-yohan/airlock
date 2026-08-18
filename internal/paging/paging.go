@@ -54,12 +54,54 @@ func Page(keys []Key, limit int, cursor string) ([]Key, string, error) {
 	next := ""
 	if end < len(keys) {
 		var err error
-		next, err = encodeCursor(keys[end-1])
+		next, err = CursorFor(keys[end-1])
 		if err != nil {
 			return nil, "", err
 		}
 	}
 	return keys[start:end], next, nil
+}
+
+// CursorFor returns the canonical cursor for a page's final record.
+func CursorFor(key Key) (string, error) {
+	return encodeCursor(key)
+}
+
+// ValidatePage verifies a requester-supplied page before its cursor advances.
+// Records must be strictly newest-first, and a nonterminal cursor must name
+// exactly the final record of a full page.
+func ValidatePage(keys []Key, limit int, cursor, next string) error {
+	if limit < 1 || limit > MaxPage || len(keys) > limit || !ValidCursor(cursor) || !ValidCursor(next) {
+		return errCursor
+	}
+	if len(keys) == 0 {
+		if next != "" {
+			return errCursor
+		}
+		return nil
+	}
+	if cursor != "" {
+		previous, err := decodeCursor(cursor)
+		if err != nil || !older(keys[0], previous) {
+			return errCursor
+		}
+	}
+	for index := range keys {
+		if _, err := CursorFor(keys[index]); err != nil || (index > 0 && !older(keys[index], keys[index-1])) {
+			return errCursor
+		}
+	}
+	if next == "" {
+		return nil
+	}
+	if len(keys) != limit {
+		return errCursor
+	}
+	expected, err := CursorFor(keys[len(keys)-1])
+	if err != nil || next != expected {
+		return errCursor
+	}
+	return nil
 }
 
 func newer(left, right Key) bool {

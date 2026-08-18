@@ -1,91 +1,37 @@
-# MVP implementation packet
+# Command-broker implementation packet
 
-Implement the accepted contract in `docs/adr/0001-two-node-authority-boundary.md`.
+Implement the accepted contract in [`adr/0001-two-node-authority-boundary.md`](adr/0001-two-node-authority-boundary.md).
 
-## Deliverable
-
-A Go 1.25 module and one `airlock` binary with two services and a CLI:
+## Public commands
 
 - `airlock requester serve --config ...`
 - `airlock trusted serve --config ...`
 - `airlock trusted requests list --config ... [--cursor CURSOR]`
-- `airlock trusted request {show,execute,deny} --config ... --id ...`
-- `airlock request create ...`
+- `airlock trusted request show --config ... --id ...`
+- `airlock trusted request execute --config ... --id ... --plan-digest ...`
+- `airlock trusted request deny --config ... --id ...`
+- `airlock request create --config ... --profile github.command --profile-version v1 --arg ... --reason ...`
+- `airlock mcp --requester-url ...`
 - `airlock keygen ...`
 
-Use the standard library unless a small dependency materially improves canonical JSON or security. Keep the dependency graph tiny and justified.
+## Requester contract
 
-## Requester service
+- Accept only a fresh signed `airlock.catalog/v2` profile when creating a current `airlock.request/v2` proposal.
+- Canonically bind profile ID/version, ordered argv, reason, creation/expiry, nonce, and request ID.
+- Reject mixed legacy/current fields, unknown profile/version, invalid UTF-8, NUL/control/ANSI/bidi, empty elements, and bounded-size violations.
+- Preserve historical v1 add-collaborator requests plus v1/v2 receipts and durable state for recovery; do not reinterpret them as current commands.
+- Expose create/observe only, with sanitized metadata and no output, trusted paths, credentials, or execution endpoint.
 
-- Loopback bind by default; non-loopback requires an explicit unsafe flag.
-- Durable local state with atomic writes and restrictive permissions.
-- Accept and validate signed capability catalogs from the trusted node.
-- Create typed requests only for catalog-advertised actions.
-- Give each request a random ID and nonce, RFC3339 timestamps, expiry, and SHA-256 digest over deterministic canonical bytes.
-- Request fields become immutable after creation.
-- Accept trusted-node Ed25519 receipts only when signature, request digest, freshness, and state transition validate.
-- Read-only human UI for catalog, pending requests, and receipts.
-- No approve or execute endpoint.
+## Trusted contract
 
-## Trusted service
+- Resolve `github.command/v1` only from trusted-local configuration. `shell.run/v1` is reserved and disabled.
+- Persist the exact resolved plan and digest with the approval/running reservation before effect. Refuse stale shown plans, changed config, changed executable identity, mutation, replay, and simultaneous execution.
+- Before reservation, stage descriptor-pinned private copies of the reviewed static `gh` and minimal `hosts.yml`; reverify the root-owned canonical Bubblewrap launcher path and digest immediately before reservation; execute only the pinned `gh` with exact reserved argv through that launcher, fixed environment, private work directory, bounded timeout, and trusted-only bounded sanitized stdout/stderr previews. Never invoke a shell or search PATH.
+- Keep one active child independent of web/CLI disconnect, kill its process group on Linux timeout/cancellation, recover interrupted work as uncertain, and never retry implicitly.
+- Render request/plan digests, every argv element, trusted-local labels, and broad-authority/risk warnings. Display is non-executable and non-editable.
 
-- Loopback bind by default; non-loopback requires an explicit unsafe flag.
-- Pull pending requests from configured requester URL; requester never calls into trusted node.
-- Validate requests against locally configured capabilities and versioned adapters, not requester catalog content.
-- Trusted-rendered UI checks Tailscale identity headers against an explicit login allowlist and fails closed when absent outside `--dev`.
-- Protect state-changing forms against CSRF and method confusion.
-- The trusted daemon alone owns state, signing, receipt delivery, and `gh`. Its
-  `0600` Unix socket in a `0700` trusted-state directory is a local-only control
-  plane for the same Unix account; CLI callers cannot select a reviewer or send
-  provider arguments, and never mutate state directly.
-- Render exact request digest, action, arguments, expiry, reason, and locally derived command.
-- Trusted execution: approve-and-execute persists a v2 approval/reservation before directly invoking configured absolute `gh` argv with a fixed environment; deny remains terminal. Do not invoke a shell, browser, arbitrary API, or requester-supplied command text.
-- Sign receipts with the trusted Ed25519 key; never expose private key material.
+## Verification
 
-## Initial adapter
+Run Go unit/race/vet, local fake-`gh` smoke, Python bootstrap/docs suites, Hermes locked pytest/ruff/compile/real-binary integration, cross-platform trusted builds, systemd verification, diagram generation/checks, and `git diff --check`. Prove one central generic-command regression test fails under a temporary legacy-only sabotage, restore it, run green, then finish with a simplify pass and repeat the gates.
 
-`github.repo.add_collaborator`:
-
-- owner and collaborator are fixed by the locally configured trusted capability;
-- the capability ID identifies its configured GitHub owner;
-- repository uses conservative GitHub name validation;
-- permission is selected from the capability's local allowed set (`pull`, `push` for the example);
-- locally derive a direct-exec `gh api --method PUT ...` argv plan;
-- never accept a command or URL from requester.
-
-## Config and sample deployment
-
-- Separate example configs for requester and trusted node; no secrets.
-- Tailscale Serve guidance and example ACL intent without modifying live Tailscale state.
-- systemd user-unit templates for each role.
-- local smoke script that starts both roles on ephemeral loopback ports, uses a fake absolute `gh` and isolated `GH_CONFIG_DIR`, executes one request through the trusted web UI and one through the trusted CLI, verifies v2 requester state and signed receipt pairs, and proves exactly two provider invocations.
-
-## Tests
-
-Include positive and negative tests for:
-
-- canonical digest determinism;
-- Ed25519 catalog and receipt verification;
-- mutated request/display/receipt binding;
-- unknown capability/action and invalid arguments;
-- shell metacharacters/path traversal/oversized fields;
-- expired request/catalog/receipt;
-- replayed receipt and invalid state transitions;
-- missing/spoofed Tailscale identity contract;
-- CSRF and wrong HTTP methods;
-- loopback binding defaults and non-loopback refusal;
-- restrictive key/state permissions where the OS supports them;
-- logs/UI/receipts not containing private keys or synthetic secret canaries.
-
-## Verification gate
-
-Run and record:
-
-```bash
-go test ./...
-go test -race ./...
-go vet ./...
-./scripts/smoke-local.sh
-```
-
-Finish with a `/simplify`-style cleanup pass: remove avoidable abstractions and duplicate validation, rerun all gates, and leave the tree committed under the configured author identity.
+All provider execution in tests must use fake `gh`; no test may mutate a real external provider or install live Airlock configuration.

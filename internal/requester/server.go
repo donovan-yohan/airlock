@@ -1,6 +1,7 @@
 package requester
 
 import (
+	"errors"
 	"html/template"
 	"net/http"
 	"strconv"
@@ -33,7 +34,22 @@ func (s *Server) pendingRequests(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	httpjson.Write(w, http.StatusOK, map[string]any{"requests": s.store.ActionableRequests()})
+	limit, cursor, ok := recordPageQuery(r)
+	if !ok {
+		httpjson.Error(w, http.StatusBadRequest, "invalid pending request page")
+		return
+	}
+	requests, nextCursor, err := s.store.ActionableRequestPage(limit, cursor)
+	if err != nil {
+		httpjson.Error(w, http.StatusBadRequest, "invalid pending request page")
+		return
+	}
+	httpjson.Write(w, http.StatusOK, pendingRequestPageResponse{Requests: requests, NextCursor: nextCursor})
+}
+
+type pendingRequestPageResponse struct {
+	Requests   []model.Request `json:"requests"`
+	NextCursor string          `json:"next_cursor,omitempty"`
 }
 
 func (s *Server) Handler() http.Handler {
@@ -64,6 +80,9 @@ func (s *Server) catalog(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.store.ImportCatalog(catalog); err != nil {
+			if capacityUnavailable(w, err) {
+				return
+			}
 			httpjson.Error(w, http.StatusUnprocessableEntity, "catalog rejected: "+err.Error())
 			return
 		}
@@ -95,6 +114,9 @@ func (s *Server) requests(w http.ResponseWriter, r *http.Request) {
 		}
 		record, err := s.store.Create(input)
 		if err != nil {
+			if capacityUnavailable(w, err) {
+				return
+			}
 			httpjson.Error(w, http.StatusUnprocessableEntity, "request rejected: "+err.Error())
 			return
 		}
@@ -163,10 +185,21 @@ func (s *Server) receipts(w http.ResponseWriter, r *http.Request) {
 	}
 	record, err := s.store.AcceptReceipt(receipt)
 	if err != nil {
+		if capacityUnavailable(w, err) {
+			return
+		}
 		httpjson.Error(w, http.StatusUnprocessableEntity, "receipt rejected: "+err.Error())
 		return
 	}
 	httpjson.Write(w, http.StatusAccepted, record)
+}
+
+func capacityUnavailable(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, ErrCapacity) {
+		return false
+	}
+	httpjson.Error(w, http.StatusServiceUnavailable, "requester capacity unavailable")
+	return true
 }
 
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
@@ -226,5 +259,5 @@ var requesterPage = template.Must(template.New("requester").Parse(`<!doctype htm
 <title>Airlock requester</title><style>
 body{font:16px system-ui,sans-serif;max-width:72rem;margin:2rem auto;padding:0 1rem;color:#18212f;background:#f7f8fa}h1,h2{color:#10253f}article{background:white;border:1px solid #ccd5df;border-radius:.6rem;padding:1rem;margin:1rem 0}code{overflow-wrap:anywhere}.state{font-weight:700}.muted{color:#536273}table{border-collapse:collapse;width:100%}th,td{text-align:left;vertical-align:top;padding:.45rem;border-bottom:1px solid #dde3ea}
 </style></head><body><h1>Airlock requester</h1><p class="muted">Read-only status. Decisions are available only on the trusted node.</p>
-<h2>Signed catalog</h2>{{if .Catalog}}<article><p><strong>Valid until:</strong> {{.Catalog.ExpiresAt}}</p>{{range .Catalog.Capabilities}}<h3>{{.DisplayName}}</h3><p><code>{{.ID}}</code></p><p>Actions: {{range .Actions}}<code>{{.}}</code> {{end}}</p>{{end}}</article>{{else}}<p>No catalog installed.</p>{{end}}
-<h2>Requests</h2><p class="muted">Pages contain at most {{.PageSize}} requests.</p>{{if .Records}}{{range .Records}}<article><p class="state">{{.State}}</p><p><strong>ID:</strong> <code>{{.Request.ID}}</code></p><p><strong>Digest:</strong> <code>{{.Request.Digest}}</code></p><p><strong>Action:</strong> <code>{{.Request.Action}}</code></p><p><strong>Repository:</strong> {{index .Request.Arguments "repository"}}</p><p><strong>Permission:</strong> {{index .Request.Arguments "permission"}}</p><p><strong>Reason:</strong> {{.Request.Reason}}</p><p><strong>Expires:</strong> {{.Request.ExpiresAt}}</p>{{if .Receipts}}<table><tr><th>Decision</th><th>Reviewer</th><th>Time</th></tr>{{range .Receipts}}<tr><td>{{.Decision}}</td><td>{{.Reviewer}}</td><td>{{.CreatedAt}}</td></tr>{{end}}</table>{{end}}</article>{{end}}{{else}}<p>No requests.</p>{{end}}{{if .NextCursor}}<p><a href="/?cursor={{.NextCursor}}">Older requests →</a></p>{{end}}</body></html>`))
+<h2>Signed catalog</h2>{{if .Catalog}}<article><p><strong>Valid until:</strong> {{.Catalog.ExpiresAt}}</p>{{range .Catalog.Profiles}}<h3>{{.DisplayName}}</h3><p><code>{{.ID}}/{{.Version}}</code></p><p>{{.AuthorityLabel}} · {{.SandboxLabel}} · {{.OutputLabel}}</p>{{end}}{{if .Catalog.Capabilities}}<p class="muted">Historical typed capabilities are retained as compatibility data.</p>{{end}}</article>{{else}}<p>No catalog installed.</p>{{end}}
+<h2>Requests</h2><p class="muted">Pages contain at most {{.PageSize}} requests. Executable paths, environment, credential locations, and raw output never appear here.</p>{{if .Records}}{{range .Records}}<article><p class="state">{{.State}}</p><p><strong>ID:</strong> <code>{{.Request.ID}}</code></p><p><strong>Digest:</strong> <code>{{.Request.Digest}}</code></p>{{if .Request.ProfileID}}<p><strong>Profile:</strong> <code>{{.Request.ProfileID}}/{{.Request.ProfileVersion}}</code></p><p><strong>Argv element count:</strong> {{len .Request.Argv}}</p>{{else}}<p><strong>Historical action:</strong> <code>{{.Request.Action}}</code></p>{{end}}<p><strong>Reason:</strong> {{.Request.Reason}}</p><p><strong>Expires:</strong> {{.Request.ExpiresAt}}</p>{{if .Receipts}}<table><tr><th>Decision</th><th>Reviewer</th><th>Plan digest</th><th>Time</th></tr>{{range .Receipts}}<tr><td>{{.Decision}}</td><td>{{.Reviewer}}</td><td>{{.PlanDigest}}</td><td>{{.CreatedAt}}</td></tr>{{end}}</table>{{end}}</article>{{end}}{{else}}<p>No requests.</p>{{end}}{{if .NextCursor}}<p><a href="/?cursor={{.NextCursor}}">Older requests →</a></p>{{end}}</body></html>`))

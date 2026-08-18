@@ -8,9 +8,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/donovan-yohan/airlock/internal/jsonstrict"
 )
 
 const maxStateBytes = 16 << 20
+
+// ErrTooLarge is returned when a durable snapshot cannot fit within the
+// atomic state-file contract. Callers may map this capacity condition to a
+// retryable service response without exposing storage internals.
+var ErrTooLarge = errors.New("state file exceeds the size limit")
 
 func Load(path string, destination any) error {
 	info, err := os.Lstat(path)
@@ -33,15 +40,10 @@ func Load(path string, destination any) error {
 		return err
 	}
 	if len(b) > maxStateBytes {
-		return errors.New("state file exceeds size limit")
+		return ErrTooLarge
 	}
-	decoder := json.NewDecoder(bytes.NewReader(b))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
+	if err := jsonstrict.DecodeOne(b, destination); err != nil {
 		return fmt.Errorf("decode state: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return errors.New("state file must contain one JSON object")
 	}
 	return nil
 }
@@ -56,13 +58,16 @@ func Save(path string, value any) error {
 		return err
 	}
 	defer directory.Close()
-	b, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(value); err != nil {
 		return err
 	}
-	b = append(b, '\n')
+	b := encoded.Bytes()
 	if len(b) > maxStateBytes {
-		return errors.New("state file exceeds the size limit and cannot be written")
+		return ErrTooLarge
 	}
 	temporary, err := os.CreateTemp(dir, ".airlock-state-*")
 	if err != nil {

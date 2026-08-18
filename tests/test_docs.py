@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
+import tomllib
 import unittest
 from collections.abc import Iterable
 from html.parser import HTMLParser
@@ -73,7 +75,10 @@ def tracked_markdown() -> list[Path]:
 
 
 def mermaid_blocks(markdown: str) -> list[str]:
-    return [block.strip() for block in re.findall(r"```mermaid\s*\n(.*?)\n```", markdown, re.DOTALL)]
+    return [
+        block.strip()
+        for block in re.findall(r"```mermaid\s*\n(.*?)\n```", markdown, re.DOTALL)
+    ]
 
 
 class DocsTests(unittest.TestCase):
@@ -90,11 +95,15 @@ class DocsTests(unittest.TestCase):
                 (DOCS / "diagrams" / name).read_text(encoding="utf-8").strip()
                 for name in source_names
             ]
-            self.assertEqual(blocks, expected, f"{markdown_name} drifted from docs/diagrams")
+            self.assertEqual(
+                blocks, expected, f"{markdown_name} drifted from docs/diagrams"
+            )
 
     def test_rendered_diagrams_exist_and_are_svg(self) -> None:
         source_stems = {path.stem for path in (DOCS / "diagrams").glob("*.mmd")}
-        rendered = {path.stem: path for path in (DOCS / "assets" / "diagrams").glob("*.svg")}
+        rendered = {
+            path.stem: path for path in (DOCS / "assets" / "diagrams").glob("*.svg")
+        }
         self.assertEqual(set(rendered), source_stems)
         for name, path in rendered.items():
             payload = path.read_text(encoding="utf-8")
@@ -108,7 +117,7 @@ class DocsTests(unittest.TestCase):
             self.assertGreater(len(payload), 500, name)
             if name == "approval-timing":
                 self.assertIn(
-                    "Direct exec configured absolute gh with fixed environment",
+                    "Bubblewrap runs pinned gh with fixed environment",
                     payload,
                 )
                 self.assertIn(
@@ -128,7 +137,9 @@ class DocsTests(unittest.TestCase):
             parser.feed(page.read_text(encoding="utf-8"))
             self.assertTrue(parser.title.strip(), page_name)
             self.assertEqual(parser.images_without_alt, [], page_name)
-            self.assertEqual(len(parser.ids), len(set(parser.ids)), f"duplicate id in {page_name}")
+            self.assertEqual(
+                len(parser.ids), len(set(parser.ids)), f"duplicate id in {page_name}"
+            )
             self.assert_local_references(page, parser.references)
 
     def test_markdown_local_references_resolve(self) -> None:
@@ -149,9 +160,12 @@ class DocsTests(unittest.TestCase):
             target = (source.parent / unquote(split.path)).resolve()
             label = source.relative_to(REPO)
             self.assertTrue(
-                target.is_relative_to(REPO), f"{label}: link escapes repository: {reference}"
+                target.is_relative_to(REPO),
+                f"{label}: link escapes repository: {reference}",
             )
-            self.assertTrue(target.exists(), f"{label}: missing local reference {reference}")
+            self.assertTrue(
+                target.exists(), f"{label}: missing local reference {reference}"
+            )
 
     def test_pages_are_script_free_and_github_pages_ready(self) -> None:
         self.assertTrue((DOCS / ".nojekyll").exists())
@@ -163,10 +177,16 @@ class DocsTests(unittest.TestCase):
 
     def test_timing_docs_use_protocol_states(self) -> None:
         expected = ("pending", "approved_for_execution", "denied", "executed")
-        for relative in ("approval-timing.md", "approval-timing.html", "diagrams/approval-timing.mmd"):
+        for relative in (
+            "approval-timing.md",
+            "approval-timing.html",
+            "diagrams/approval-timing.mmd",
+        ):
             content = (DOCS / relative).read_text(encoding="utf-8")
             for state in expected:
-                self.assertIn(state, content, f"{relative} omits protocol state {state}")
+                self.assertIn(
+                    state, content, f"{relative} omits protocol state {state}"
+                )
             self.assertNotIn("execution_failed", content, relative)
             self.assertNotIn("rejected receipt", content, relative)
 
@@ -181,6 +201,101 @@ class DocsTests(unittest.TestCase):
             "Credentials never cross the boundary",
         ):
             self.assertIn(claim, page)
+
+    def test_command_broker_contract_and_versions_are_consistent(self) -> None:
+        contract_files = (
+            REPO / "README.md",
+            DOCS / "adr" / "0001-two-node-authority-boundary.md",
+            DOCS / "mcp-conformance.md",
+            DOCS / "security.html",
+            REPO / "integrations" / "hermes" / "README.md",
+            REPO / "plugins" / "airlock" / "skills" / "airlock" / "SKILL.md",
+        )
+        for path in contract_files:
+            content = path.read_text(encoding="utf-8")
+            for claim in ("github.command/v1", "reviewer-approved RCE", "shell.run/v1"):
+                self.assertIn(claim, content, f"{path.relative_to(REPO)} omits {claim}")
+
+        protocol = (DOCS / "mcp-conformance.md").read_text(encoding="utf-8")
+        for version in (
+            "airlock.catalog/v2",
+            "airlock.request/v2",
+            "airlock.receipt/v3",
+        ):
+            self.assertIn(version, protocol)
+
+        claude = json.loads(
+            (REPO / "plugins" / "airlock" / ".claude-plugin" / "plugin.json").read_text()
+        )
+        codex = json.loads(
+            (REPO / "plugins" / "airlock" / ".codex-plugin" / "plugin.json").read_text()
+        )
+        pyproject = tomllib.loads(
+            (REPO / "integrations" / "hermes" / "pyproject.toml").read_text()
+        )
+        hermes_manifest = (
+            REPO / "integrations" / "hermes" / "plugin.yaml"
+        ).read_text(encoding="utf-8")
+        versions = {claude["version"], codex["version"], pyproject["project"]["version"]}
+        self.assertEqual(versions, {"0.4.0"})
+        self.assertRegex(hermes_manifest, r"(?m)^version: 0\.4\.0$")
+        self.assertIn("Package 0.4.0", (DOCS / "index.html").read_text())
+
+    def test_network_and_execution_disclaimers_are_not_marketing_copy(self) -> None:
+        public_surfaces = [REPO / "README.md"]
+        for root in (DOCS, REPO / "integrations", REPO / "plugins"):
+            public_surfaces.extend(
+                path
+                for path in root.rglob("*")
+                if path.is_file() and path.suffix in {".html", ".md", ".mmd", ".yaml", ".json"}
+            )
+        for path in public_surfaces:
+            self.assertNotIn(
+                "airgapped", path.read_text(encoding="utf-8").lower(), path.relative_to(REPO)
+            )
+
+        two_node_docs = (
+            REPO / "README.md",
+            DOCS / "adr" / "0001-two-node-authority-boundary.md",
+            DOCS / "architecture.md",
+            DOCS / "index.html",
+        )
+        for path in two_node_docs:
+            content = path.read_text(encoding="utf-8").lower()
+            self.assertIn("two-node", content, path.relative_to(REPO))
+
+        network_docs = (
+            REPO / "README.md",
+            DOCS / "adr" / "0001-two-node-authority-boundary.md",
+            DOCS / "architecture.md",
+            DOCS / "architecture.html",
+            DOCS / "approval-timing.md",
+            DOCS / "approval-timing.html",
+            DOCS / "security.html",
+        )
+        for path in network_docs:
+            self.assertRegex(
+                path.read_text(encoding="utf-8").lower(),
+                r"not an egress\s+firewall",
+                path.relative_to(REPO),
+            )
+
+        execution_docs = (
+            REPO / "README.md",
+            DOCS / "adr" / "0001-two-node-authority-boundary.md",
+            DOCS / "architecture.md",
+            DOCS / "approval-timing.md",
+            DOCS / "security.html",
+            REPO / "integrations" / "hermes" / "skills" / "airlock" / "SKILL.md",
+            REPO / "plugins" / "airlock" / "skills" / "airlock" / "SKILL.md",
+        )
+        for path in execution_docs:
+            content = path.read_text(encoding="utf-8").lower()
+            self.assertTrue(
+                "does not prove provider state" in content
+                or "not independent provider proof" in content,
+                path.relative_to(REPO),
+            )
 
 
 if __name__ == "__main__":

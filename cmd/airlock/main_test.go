@@ -91,7 +91,15 @@ func TestTrustedCLIRequiresRunningDaemonAndNeverFallsBackToStateOrGH(t *testing.
   "requester_url":"http://127.0.0.1:8787",
   "github_cli_path":"` + marker + `",
   "github_config_dir":"` + filepath.Join(dir, "gh-config") + `",
+  "sandbox_cli_path":"/usr/bin/bwrap",
   "execution_timeout":"30s",
+  "profile_config_version":"test-v1",
+  "credential_authority_label":"Broad GitHub authority",
+  "execution_identity_label":"Trusted test identity",
+  "sandbox_label":"Ephemeral private state",
+  "network_label":"GitHub network",
+  "cwd_label":"Ephemeral directory",
+  "output_label":"Bounded sanitized trusted-local output preview",
   "poll_interval":"2s",
   "request_max_ttl":"15m",
   "catalog_ttl":"1h",
@@ -102,9 +110,13 @@ func TestTrustedCLIRequiresRunningDaemonAndNeverFallsBackToStateOrGH(t *testing.
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := run([]string{"trusted", "request", "execute", "--config", configPath, "--id", "req_0123456789abcdefghij"})
+	err := run([]string{"trusted", "request", "execute", "--config", configPath, "--id", "req_0123456789abcdefghij", "--plan-digest", strings.Repeat("a", 64)})
+	if err == nil || !strings.Contains(err.Error(), "--confirm-full-authority") {
+		t.Fatalf("missing confirmation error=%v", err)
+	}
+	err = run([]string{"trusted", "request", "execute", "--config", configPath, "--id", "req_0123456789abcdefghij", "--plan-digest", strings.Repeat("a", 64), "--confirm-full-authority"})
 	if err == nil || !strings.Contains(err.Error(), "trusted daemon is unavailable") {
-		t.Fatalf("missing daemon error=%v", err)
+		t.Fatalf("missing daemon error after confirmation=%v", err)
 	}
 	err = run([]string{"trusted", "requests", "list", "--config", configPath, "--cursor", "not-a-cursor"})
 	if err == nil || !strings.Contains(err.Error(), "trusted control cursor is invalid") {
@@ -123,5 +135,35 @@ func TestMCPCommandRejectsUnsafeRequesterURLs(t *testing.T) {
 		if err := run([]string{"mcp", "--requester-url", raw}); err == nil {
 			t.Fatalf("unsafe MCP requester URL accepted %q", raw)
 		}
+	}
+}
+
+func TestRequestCreateRejectsUnsafeArgvWithoutRequesterEgress(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "requester.json")
+	config := `{"listen":"127.0.0.1:1","state_dir":"state","trusted_public_key_file":"public.key","request_max_ttl":"15m","catalog_max_ttl":"1h","receipt_max_ttl":"24h"}`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		argv string
+	}{
+		{"credential", "Authorization: Bearer " + strings.Repeat("a", 20)},
+		{"invisible", "safe\u200bvalue"},
+		{"noncharacter", "safe\ufdd0value"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := run([]string{"request", "create", "--config", configPath, "--profile", "github.command", "--profile-version", "v1", "--arg", "api", "--arg", test.argv, "--reason", "review exact argv"})
+			if err == nil {
+				t.Fatalf("unsafe argv accepted by CLI: %s", test.name)
+			}
+			if strings.Contains(err.Error(), test.argv) {
+				t.Fatal("unsafe argv appeared in CLI error")
+			}
+			if strings.Contains(err.Error(), "requester unavailable") {
+				t.Fatal("CLI attempted requester transport before canonical preflight")
+			}
+		})
 	}
 }

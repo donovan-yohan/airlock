@@ -2,12 +2,12 @@
 
 Native Hermes tools for requesting authority through [Airlock](../..) without giving the agent privileged credentials.
 
-The plugin is deliberately thin. It talks only to the Airlock **requester** service on a loopback IP literal, follows no redirects, accepts no credentials, and never connects to the trusted node. Airlock remains the authority boundary and independently validates the signed catalog, typed request, receipts, expiry, replay, and state transitions.
+The plugin is deliberately thin. It talks only to the Airlock **requester** service on a loopback IP literal, follows no redirects, accepts no credentials, and never connects to the trusted node. Airlock independently validates the current signed profile catalog, canonical command proposal, receipts, expiry, replay, and state transitions.
 
 ## Tools
 
 - `airlock_capabilities` — discover the signed capabilities accepted by the requester.
-- `airlock_create_request` — create a typed human-review request. It never executes the requested action.
+- `airlock_create_request` — propose exact ordered `github.command/v1` argv for human review. It never executes the proposal.
 - `airlock_requests` — recover recent requests or read one request's trusted receipt state.
 
 When the plugin is enabled, Hermes registers these model-facing tools and the bundled `airlock` skill. The skill's short description is part of Hermes's skill index, while its full procedure and deferred tool schemas load only when relevant. That remains the default persistence mechanism: no global prompt mutation or per-repository `AGENTS.md` edit is required. An optional bounded plugin-owned system-prompt section can be explicitly enabled as described below.
@@ -53,7 +53,11 @@ The URL must be plain HTTP on an explicit loopback IP and port. `localhost`, rem
 
 ## Semantics
 
-`airlock_create_request` returning `pending` means only that the local requester accepted and persisted a request. `approved_for_execution` means a trusted reviewer authorized a locally reconstructed execution attempt. `executed` only records that the trusted child returned success. External state still needs verification before claiming the requested effect exists; v1 manual states remain readable for rollout recovery.
+`github.command/v1` is broad: it can propose arbitrary operations supported by `gh`, and a new operation does not require another adapter. Its argv elements are model-visible request data, including shell metacharacters that remain literal because the trusted node never invokes a shell. It is credentialed reviewer-approved RCE, not a semantic safety policy. `shell.run/v1` is reserved but disabled and non-executable.
+
+`airlock_create_request` returning `pending` means only that the local requester accepted and persisted a proposal. `approved_for_execution` means a trusted reviewer authorized one exact resolved-plan digest. `executed` only records that the trusted child returned success and completion persisted. External state still needs verification before claiming the requested effect exists; historical v1 requests and v1/v2 receipts remain readable for recovery.
+
+Hermes receives proposed profile/argv and sanitized receipt metadata. It never receives the resolved executable/config path, credentials, environment, child output, or provider response. Unknown extra fields are rejected or omitted from the model-facing projection.
 
 This is not a Hermes approval transport. Hermes tool approvals govern Hermes-owned tool execution; Airlock requests authority held on another node and cannot auto-approve or auto-execute it.
 

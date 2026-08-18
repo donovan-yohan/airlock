@@ -33,30 +33,20 @@ func TestParseLoopbackURLRejectsAuthorityExpansion(t *testing.T) {
 }
 
 func TestClientRefusesRedirectAndEnvironmentProxy(t *testing.T) {
-	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	redirectClient := clientWithHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "http://127.0.0.1:1", http.StatusFound)
 	}))
-	defer redirect.Close()
-	redirectClient, err := NewClient(redirect.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := redirectClient.Capabilities(context.Background()); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("redirect error=%v, want unavailable", err)
 	}
 
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	catalog := clientTestCatalog(now)
-	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	client := clientWithHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(catalog)
 	}))
-	defer direct.Close()
 	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
-	client, err := NewClient(direct.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
 	client.now = func() time.Time { return now }
 	if _, err := client.Capabilities(context.Background()); err != nil {
 		t.Fatalf("client inherited proxy environment: %v", err)
@@ -73,16 +63,11 @@ func TestClientPreservesOnlySafeRequesterRejectionDetails(t *testing.T) {
 		{"control", "unsafe\x1b[31m rejection", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			client := clientWithHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusUnprocessableEntity)
 				_ = json.NewEncoder(w).Encode(map[string]string{"error": test.detail})
 			}))
-			defer server.Close()
-			client, err := NewClient(server.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = client.Create(context.Background(), CreateInput{})
+			_, err := client.Create(context.Background(), CreateInput{})
 			if !errors.Is(err, ErrRejected) {
 				t.Fatalf("rejection error=%v, want ErrRejected", err)
 			}
@@ -91,12 +76,20 @@ func TestClientPreservesOnlySafeRequesterRejectionDetails(t *testing.T) {
 			}
 		})
 	}
+	client := clientWithHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"error":"safe detail","error":"attacker-selected detail"}`))
+	}))
+	_, err := client.Create(context.Background(), CreateInput{})
+	if !errors.Is(err, ErrRejected) || strings.Contains(err.Error(), "detail") {
+		t.Fatalf("ambiguous rejection detail was exposed: %v", err)
+	}
 }
 
 func TestClientRejectsFutureDataAndControlCursors(t *testing.T) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	futureCatalog := clientTestCatalog(now.Add(10 * time.Minute))
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := clientWithHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/v1/catalog":
 			_ = json.NewEncoder(w).Encode(futureCatalog)
@@ -109,11 +102,6 @@ func TestClientRejectsFutureDataAndControlCursors(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
-	defer server.Close()
-	client, err := NewClient(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
 	client.now = func() time.Time { return now }
 	if _, err := client.Capabilities(context.Background()); !errors.Is(err, ErrInvalidData) {
 		t.Fatalf("future catalog error=%v, want invalid data", err)
@@ -132,6 +120,7 @@ func TestClientRejectsFutureDataAndControlCursors(t *testing.T) {
 func clientTestCatalog(now time.Time) model.Catalog {
 	return model.Catalog{
 		Version: model.CatalogVersion, IssuedAt: model.Timestamp(now.Add(-time.Minute)), ExpiresAt: model.Timestamp(now.Add(time.Hour)),
+		Profiles: []model.CommandProfile{{ID: model.ProfileGitHubCommandID, Version: model.ProfileGitHubCommandVersion, DisplayName: "GitHub CLI command", AuthorityLabel: "Broad GitHub authority", SandboxLabel: "Ephemeral local state", NetworkLabel: "GitHub network", CWDLabel: "Ephemeral directory", OutputLabel: "Bounded sanitized trusted-local output preview", Limits: model.ProfileLimits{MaxArgvCount: model.MaxArgvCount, MaxArgumentBytes: model.MaxArgumentBytes, MaxAggregateBytes: model.MaxArgvAggregateBytes}}},
 		Capabilities: []model.Capability{{
 			ID: "github:example-owner", DisplayName: "GitHub",
 			Actions:     []string{model.ActionGitHubAddCollaborator},
@@ -143,12 +132,34 @@ func clientTestCatalog(now time.Time) model.Catalog {
 func clientTestRecord(t *testing.T, created time.Time) Record {
 	t.Helper()
 	request := model.Request{
-		Version: model.RequestVersion, ID: "req_0123456789abcdefghij", CapabilityID: "github:example-owner", Action: model.ActionGitHubAddCollaborator, // pragma: allowlist secret
-		Arguments: map[string]string{"repository": "project", "permission": "push"}, Reason: "bounded reason",
+		Version: model.RequestVersion, ID: "req_0123456789abcdefghij", ProfileID: model.ProfileGitHubCommandID, ProfileVersion: model.ProfileGitHubCommandVersion, // pragma: allowlist secret
+		Argv: []string{"api", "repos/example-owner/project"}, Reason: "bounded reason",
 		CreatedAt: model.Timestamp(created), ExpiresAt: model.Timestamp(created.Add(time.Hour)), Nonce: "abcdefghijklmnopqrstuvwx",
 	}
 	if err := model.SetRequestDigest(&request); err != nil {
 		t.Fatal(err)
 	}
 	return Record{Request: request, State: "pending", Receipts: []model.Receipt{}}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+func clientWithHandler(t *testing.T, handler http.Handler) *Client {
+	t.Helper()
+	client, err := NewClient("http://127.0.0.1:8787")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		result := response.Result()
+		result.Request = request
+		return result, nil
+	})
+	return client
 }

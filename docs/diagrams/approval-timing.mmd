@@ -9,24 +9,26 @@ sequenceDiagram
   participant Provider as GitHub CLI / provider
   participant Verify as Read-only verifier
 
-  Agent->>MCP: Create exact typed request
-  MCP->>Requester: Persist immutable ID, digest, expiry
-  Trusted->>Requester: Pull pending typed request
-  Trusted->>Trusted: Revalidate local adapter and derive direct-exec plan
-  Trusted->>Human: Show exact executable and argv
-  Human->>Trusted: Approve and execute
+  Agent->>MCP: Propose github.command/v1 ordered argv
+  MCP->>Requester: Persist immutable ID, request digest, expiry
+  Trusted->>Requester: Pull pending hostile proposal
+  Trusted->>Trusted: Resolve trusted profile and plan digest
+  Trusted->>Human: Show digests, distinct argv, local policy, risks
+  Human->>Trusted: Approve exact plan digest or deny
   alt reviewer denies
     Trusted->>Requester: Publish denied receipt
   else reviewer approves
-    Trusted->>Trusted: Atomically persist approved_for_execution + running attempt
-    Trusted->>Provider: Direct exec configured absolute gh with fixed environment
+    Trusted->>Trusted: Stage opened gh and hosts.yml snapshots and reverify canonical bwrap identity
+    Trusted->>Trusted: Atomically persist approved_for_execution + immutable plan + running attempt
+    Trusted->>Provider: Bubblewrap runs pinned gh with fixed environment
+    Note over Trusted,Provider: Shared network with bounded sanitized previews kept trusted-only
     alt child exits zero and completion persists
       Trusted->>Trusted: Atomically persist executed receipt + succeeded attempt
       Trusted->>Requester: Publish approved_for_execution then executed receipts
       Requester-->>MCP: executed state
     else pre-invocation failure or ambiguous child outcome
       Trusted->>Trusted: Persist bounded failed or uncertain attempt
-      Note over Trusted,Human: No executed receipt. Reviewer inspects before explicit retry.
+      Note over Trusted,Human: No executed receipt. Verify externally before any explicit retry.
     end
   end
   Agent->>Verify: Independently read provider state

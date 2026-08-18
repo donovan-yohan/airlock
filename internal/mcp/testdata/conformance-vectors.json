@@ -11,10 +11,9 @@
     "name": "valid-create",
     "tool": "airlock_create_request",
     "arguments": {
-      "capability_id": "github:example-owner",
-      "action": "github.repo.add_collaborator",
-      "repository": "project",
-      "permission": "push",
+      "profile_id": "github.command",
+      "profile_version": "v1",
+      "argv": ["api", "repos/example-owner/project"],
       "reason": "bounded request",
       "ttl_seconds": 600
     },
@@ -26,10 +25,9 @@
     "name": "malformed",
     "tool": "airlock_create_request",
     "arguments": {
-      "capability_id": "github:example-owner",
-      "action": "github.repo.add_collaborator",
-      "repository": "project",
-      "permission": "push",
+      "profile_id": "github.command",
+      "profile_version": "v1",
+      "argv": ["api", "repos/example-owner/project"],
       "reason": "bounded request",
       "unexpected": true
     },
@@ -41,10 +39,9 @@
     "name": "oversized",
     "tool": "airlock_create_request",
     "arguments": {
-      "capability_id": "github:example-owner",
-      "action": "github.repo.add_collaborator",
-      "repository": "project",
-      "permission": "push",
+      "profile_id": "github.command",
+      "profile_version": "v1",
+      "argv": ["api", "repos/example-owner/project"],
       "reason_fixture": "oversized"
     },
     "fixture": "valid",
@@ -55,10 +52,9 @@
     "name": "control-character",
     "tool": "airlock_create_request",
     "arguments": {
-      "capability_id": "github:example-owner",
-      "action": "github.repo.add_collaborator",
-      "repository": "project",
-      "permission": "push",
+      "profile_id": "github.command",
+      "profile_version": "v1",
+      "argv": ["api", "repos/example-owner/project"],
       "reason_fixture": "control"
     },
     "fixture": "valid",
@@ -69,11 +65,23 @@
     "name": "secret-shaped-reason",
     "tool": "airlock_create_request",
     "arguments": {
-      "capability_id": "github:example-owner",
-      "action": "github.repo.add_collaborator",
-      "repository": "project",
-      "permission": "push",
+      "profile_id": "github.command",
+      "profile_version": "v1",
+      "argv": ["api", "repos/example-owner/project"],
       "reason_fixture": "secret"
+    },
+    "fixture": "valid",
+    "want_error": true,
+    "want_code": "invalid_arguments"
+  },
+  {
+    "name": "invisible-argv",
+    "tool": "airlock_create_request",
+    "arguments": {
+      "profile_id": "github.command",
+      "profile_version": "v1",
+      "argv": ["api", "safe​value"],
+      "reason": "bounded request"
     },
     "fixture": "valid",
     "want_error": true,
@@ -90,18 +98,47 @@
     "want_fragment": "\"effective_state\":\"expired\""
   },
   {
-    "name": "unknown-action",
+    "name": "unknown-profile",
     "tool": "airlock_create_request",
     "arguments": {
-      "capability_id": "github:example-owner",
-      "action": "shell.run",
-      "repository": "project",
-      "permission": "push",
+      "profile_id": "shell.run",
+      "profile_version": "v1",
+      "argv": ["printf", "hello"],
       "reason": "bounded request"
     },
     "fixture": "valid",
     "want_error": true,
     "want_code": "invalid_arguments"
+  },
+  {
+    "name": "trusted-field-injection",
+    "tool": "airlock_create_request",
+    "arguments": {
+      "profile_id": "github.command",
+      "profile_version": "v1",
+      "argv": ["api", "repos/example-owner/project"],
+      "reason": "bounded request",
+      "executable": "/tmp/requester-selected",
+      "env": {"GH_TOKEN": "requester-selected"},
+      "cwd": "/tmp/requester-selected",
+      "timeout_seconds": 9999
+    },
+    "fixture": "valid",
+    "want_error": true,
+    "want_code": "invalid_arguments"
+  },
+  {
+    "name": "shell-metacharacters-are-argv",
+    "tool": "airlock_create_request",
+    "arguments": {
+      "profile_id": "github.command",
+      "profile_version": "v1",
+      "argv": ["api", ";", "$(id)", "a && b"],
+      "reason": "review exact argv"
+    },
+    "fixture": "valid",
+    "want_error": false,
+    "want_fragment": "recorded_state"
   },
   {
     "name": "service-down",

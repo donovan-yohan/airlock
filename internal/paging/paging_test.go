@@ -62,3 +62,41 @@ func TestValidCursorRejectsOversizeAndControlText(t *testing.T) {
 		}
 	}
 }
+
+func TestValidatePageRejectsInvalidContinuation(t *testing.T) {
+	oldest := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+	keys := []Key{
+		{ID: "req_c", CreatedAt: oldest.Add(2 * time.Second)},
+		{ID: "req_b", CreatedAt: oldest.Add(time.Second)},
+		{ID: "req_a", CreatedAt: oldest},
+	}
+	cursorFor := func(t *testing.T, key Key) string {
+		t.Helper()
+		cursor, err := CursorFor(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cursor
+	}
+	if err := ValidatePage(keys[:2], 2, "", cursorFor(t, keys[1])); err != nil {
+		t.Fatalf("valid nonterminal page: %v", err)
+	}
+	for name, test := range map[string]struct {
+		page   []Key
+		cursor string
+		next   string
+	}{
+		"empty nonterminal": {nil, "", cursorFor(t, keys[0])},
+		"short nonterminal": {keys[:1], "", cursorFor(t, keys[0])},
+		"mismatched cursor": {keys[:2], "", cursorFor(t, keys[2])},
+		"nonforward cycle":  {keys[:2], cursorFor(t, keys[1]), cursorFor(t, keys[1])},
+		"unordered records": {[]Key{keys[1], keys[0]}, "", cursorFor(t, keys[0])},
+		"oversized page":    {keys, "", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidatePage(test.page, 2, test.cursor, test.next); err == nil {
+				t.Fatal("invalid continuation accepted")
+			}
+		})
+	}
+}

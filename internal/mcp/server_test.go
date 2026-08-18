@@ -2,10 +2,10 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -104,7 +104,7 @@ func TestMCPDiscoveryIsOfflineAndExact(t *testing.T) {
 	if len(Instructions()) >= 2048 {
 		t.Fatalf("instructions too long: %d", len(Instructions()))
 	}
-	for _, phrase := range []string{"untrusted data", "create and observe", "never execute", "executed", "external verification"} {
+	for _, phrase := range []string{"untrusted data", "propose and observe", "never execute", "executed", "verify provider state"} {
 		if !strings.Contains(Instructions(), phrase) {
 			t.Fatalf("instructions missing %q", phrase)
 		}
@@ -136,6 +136,49 @@ func TestMCPDiscoveryIsOfflineAndExact(t *testing.T) {
 	}
 }
 
+func TestMCPRejectsDuplicateProposalFields(t *testing.T) {
+	server := testMCPServer(t, "current")
+	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"airlock_create_request","arguments":{"profile_id":"github.command","profile_version":"v1","argv":["api","user"],"argv":["auth","token"],"reason":"review exact argv","ttl_seconds":600}}}` + "\n"
+	output, err := formatForTest(server, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, `"code":-32600`) {
+		t.Fatalf("ambiguous MCP proposal was not rejected at the protocol boundary: %s", output)
+	}
+}
+
+func TestMCPRejectsCredentialAndInvisibleArgvBeforeRequesterEgress(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	fake := &fakeRequester{created: testRecord(t, now, false)}
+	server := newServer(fake)
+	server.now = func() time.Time { return now }
+	for _, test := range []struct {
+		name string
+		argv string
+	}{
+		{"credential", "Authorization: Bearer " + strings.Repeat("a", 20)},
+		{"invisible", "safe\u200bvalue"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"airlock_create_request","arguments":{"profile_id":"github.command","profile_version":"v1","argv":["api",%q],"reason":"review exact argv","ttl_seconds":600}}}`, test.argv)
+			output, err := formatForTest(server, input+"\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(output, `"isError":true`) {
+				t.Fatalf("unsafe argv accepted through MCP: %s", test.name)
+			}
+			if strings.Contains(output, test.argv) {
+				t.Fatal("unsafe argv appeared in MCP response")
+			}
+		})
+	}
+	if fake.createCalls != 0 {
+		t.Fatal("unsafe MCP argv reached requester client")
+	}
+}
+
 func TestMCPRejectsProtocolAndNeverReturnsSensitiveCatalogFields(t *testing.T) {
 	server := testMCPServer(t, "valid")
 	for _, input := range []string{
@@ -160,6 +203,49 @@ func TestMCPRejectsProtocolAndNeverReturnsSensitiveCatalogFields(t *testing.T) {
 		if strings.Contains(output, forbidden) {
 			t.Fatalf("unsafe catalog field leaked %q: %s", forbidden, output)
 		}
+	}
+}
+
+func TestMCPRequestPagesStayWithinFramingBudget(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	records := make([]requester.Record, maxMCPRecordPage)
+	for index := range records {
+		record := testRecord(t, now, false)
+		record.Request.ID = fmt.Sprintf("req_%020d", index)
+		record.Request.Digest = strings.Repeat("a", 64)
+		record.Request.Argv = make([]string, model.MaxArgvCount)
+		for argvIndex := range record.Request.Argv {
+			record.Request.Argv[argvIndex] = strings.Repeat(`"`, model.MaxArgvAggregateBytes/model.MaxArgvCount)
+		}
+		record.Request.Reason = strings.Repeat(`"`, model.MaxReasonBytes)
+		record.Receipts = make([]model.Receipt, 5)
+		for receiptIndex := range record.Receipts {
+			record.Receipts[receiptIndex] = model.Receipt{
+				ID: fmt.Sprintf("rec_%020d", index*5+receiptIndex), Decision: model.DecisionApproveForExecution,
+				Reviewer: strings.Repeat(`"`, 254), PlanDigest: strings.Repeat("b", 64),
+				CreatedAt: model.Timestamp(now), ExpiresAt: model.Timestamp(now.Add(time.Hour)),
+			}
+		}
+		records[index] = record
+	}
+	fake := &fakeRequester{records: records}
+	server := newServer(fake)
+	server.now = func() time.Time { return now }
+	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"airlock_requests","arguments":{}}}` + "\n"
+	output, err := formatForTest(server, input)
+	if err != nil || strings.Contains(output, `"isError":true`) || fake.recordsLimit != maxMCPRecordPage || len(output) > maxMessageBytes {
+		t.Fatalf("bounded default page limit=%d bytes=%d err=%v output=%s", fake.recordsLimit, len(output), err, output)
+	}
+	t.Logf("maximum MCP request page bytes=%d", len(output))
+	oversized := fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"airlock_requests","arguments":{"limit":%d}}}`, maxMCPRecordPage+1) + "\n"
+	output, err = formatForTest(server, oversized)
+	if err != nil || !strings.Contains(output, `"isError":true`) {
+		t.Fatalf("oversized MCP page accepted: err=%v output=%s", err, output)
+	}
+	properties := toolDefinitions[2].InputSchema["properties"].(map[string]any)
+	limit := properties["limit"].(map[string]any)
+	if limit["maximum"] != maxMCPRecordPage {
+		t.Fatalf("request tool schema maximum=%v", limit["maximum"])
 	}
 }
 
@@ -205,8 +291,8 @@ func TestRequestViewRecognizesTrustedExecutionTerminalState(t *testing.T) {
 	record.State = "executed"
 	request := record.Request
 	record.Receipts = []model.Receipt{
-		{Version: model.ReceiptVersion, ID: "rec_0123456789abcdefghij", RequestID: request.ID, RequestDigest: request.Digest, Decision: model.DecisionApproveForExecution, Reviewer: "reviewer@example.invalid", AdapterVersion: model.AdapterGitHubAddCollaboratorV1, CreatedAt: model.Timestamp(now), ExpiresAt: model.Timestamp(now.Add(time.Hour))},
-		{Version: model.ReceiptVersion, ID: "rec_0123456789abcdefghik", RequestID: request.ID, RequestDigest: request.Digest, Decision: model.DecisionExecuted, Reviewer: "reviewer@example.invalid", AdapterVersion: model.AdapterGitHubAddCollaboratorV1, CreatedAt: model.Timestamp(now.Add(time.Second)), ExpiresAt: model.Timestamp(now.Add(time.Hour))},
+		{Version: model.ReceiptVersion, ID: "rec_0123456789abcdefghij", RequestID: request.ID, RequestDigest: request.Digest, Decision: model.DecisionApproveForExecution, Reviewer: "reviewer@example.invalid", ProfileID: model.ProfileGitHubCommandID, ProfileVersion: model.ProfileGitHubCommandVersion, PlanDigest: strings.Repeat("b", 64), CreatedAt: model.Timestamp(now), ExpiresAt: model.Timestamp(now.Add(time.Hour))},
+		{Version: model.ReceiptVersion, ID: "rec_0123456789abcdefghik", RequestID: request.ID, RequestDigest: request.Digest, Decision: model.DecisionExecuted, Reviewer: "reviewer@example.invalid", ProfileID: model.ProfileGitHubCommandID, ProfileVersion: model.ProfileGitHubCommandVersion, PlanDigest: strings.Repeat("b", 64), CreatedAt: model.Timestamp(now.Add(time.Second)), ExpiresAt: model.Timestamp(now.Add(time.Hour))},
 	}
 	view := requestView(record, now)
 	if view["effective_state"] != "executed" || view["effect_status"] != "trusted_execution_attested_external_verification_required" {
@@ -217,36 +303,40 @@ func TestRequestViewRecognizesTrustedExecutionTerminalState(t *testing.T) {
 func testMCPServer(t *testing.T, fixture string) *Server {
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Second)
-	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
+	fake := &fakeRequester{err: requester.ErrUnavailable}
 	if fixture != "down" {
-		catalog := testCatalog(now)
-		record := testRecord(t, now, fixture == "expired")
-		createdRecord := testRecord(t, now, false)
-		handler = func(w http.ResponseWriter, request *http.Request) {
-			switch request.URL.Path {
-			case "/api/v1/catalog":
-				_ = json.NewEncoder(w).Encode(catalog)
-			case "/api/v1/requests":
-				if request.Method == http.MethodPost {
-					w.WriteHeader(http.StatusCreated)
-					_ = json.NewEncoder(w).Encode(createdRecord)
-					return
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"requests": []requester.Record{record}})
-			default:
-				w.WriteHeader(http.StatusNotFound)
-			}
-		}
+		fake = &fakeRequester{catalog: testCatalog(now), record: testRecord(t, now, fixture == "expired"), created: testRecord(t, now, false)}
 	}
-	httpServer := httptest.NewServer(handler)
-	t.Cleanup(httpServer.Close)
-	client, err := requester.NewClient(httpServer.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := New(client)
+	server := newServer(fake)
 	server.now = func() time.Time { return now }
 	return server
+}
+
+type fakeRequester struct {
+	catalog      model.Catalog
+	record       requester.Record
+	records      []requester.Record
+	created      requester.Record
+	err          error
+	createCalls  int
+	recordsLimit int
+}
+
+func (f *fakeRequester) Capabilities(context.Context) (model.Catalog, error) {
+	return f.catalog, f.err
+}
+
+func (f *fakeRequester) Create(_ context.Context, input requester.CreateInput) (requester.Record, error) {
+	f.createCalls++
+	return f.created, f.err
+}
+
+func (f *fakeRequester) Records(_ context.Context, limit int, _ string) (requester.Page, error) {
+	f.recordsLimit = limit
+	if f.records != nil {
+		return requester.Page{Records: append([]requester.Record(nil), f.records...)}, f.err
+	}
+	return requester.Page{Records: []requester.Record{f.record}}, f.err
 }
 
 // testCatalog is deliberately unsigned: the requester-side client holds no
@@ -255,6 +345,7 @@ func testCatalog(now time.Time) model.Catalog {
 	return model.Catalog{
 		Version: model.CatalogVersion, IssuedAt: model.Timestamp(now.Add(-time.Minute)), ExpiresAt: model.Timestamp(now.Add(time.Hour)),
 		TrustedPublicKey: "trusted-credential-canary", Signature: "signature-canary",
+		Profiles: []model.CommandProfile{{ID: model.ProfileGitHubCommandID, Version: model.ProfileGitHubCommandVersion, DisplayName: "GitHub CLI command", AuthorityLabel: "Broad GitHub authority", SandboxLabel: "Ephemeral private state", NetworkLabel: "GitHub network", CWDLabel: "Ephemeral directory", OutputLabel: "Bounded sanitized trusted-local output preview", Limits: model.ProfileLimits{MaxArgvCount: model.MaxArgvCount, MaxArgumentBytes: model.MaxArgumentBytes, MaxAggregateBytes: model.MaxArgvAggregateBytes}}},
 		Capabilities: []model.Capability{{
 			ID: "github:example-owner", DisplayName: "gh api https://untrusted.invalid",
 			Actions:     []string{model.ActionGitHubAddCollaborator},
@@ -272,8 +363,8 @@ func testRecord(t *testing.T, now time.Time, expired bool) requester.Record {
 		created = expires.Add(-10 * time.Minute)
 	}
 	request := model.Request{
-		Version: model.RequestVersion, ID: "req_0123456789abcdefghij", CapabilityID: "github:example-owner", Action: model.ActionGitHubAddCollaborator, // pragma: allowlist secret
-		Arguments: map[string]string{"repository": "project", "permission": "push"}, Reason: "bounded reason",
+		Version: model.RequestVersion, ID: "req_0123456789abcdefghij", ProfileID: model.ProfileGitHubCommandID, ProfileVersion: model.ProfileGitHubCommandVersion,
+		Argv: []string{"api", "repos/example-owner/project"}, Reason: "bounded reason",
 		CreatedAt: model.Timestamp(created), ExpiresAt: model.Timestamp(expires), Nonce: "abcdefghijklmnopqrstuvwx",
 	}
 	if err := model.SetRequestDigest(&request); err != nil {
@@ -283,9 +374,9 @@ func testRecord(t *testing.T, now time.Time, expired bool) requester.Record {
 		return requester.Record{Request: request, State: "pending", Receipts: []model.Receipt{}}
 	}
 	receipt := model.Receipt{
-		Version: model.ReceiptVersionV1, ID: "rec_0123456789abcdefghij", RequestID: request.ID, RequestDigest: request.Digest,
-		Decision: model.DecisionApprove, Reviewer: "reviewer@example.invalid", AdapterVersion: model.AdapterGitHubAddCollaboratorV1,
+		Version: model.ReceiptVersion, ID: "rec_0123456789abcdefghij", RequestID: request.ID, RequestDigest: request.Digest,
+		Decision: model.DecisionApproveForExecution, Reviewer: "reviewer@example.invalid", ProfileID: model.ProfileGitHubCommandID, ProfileVersion: model.ProfileGitHubCommandVersion, PlanDigest: strings.Repeat("b", 64),
 		CreatedAt: model.Timestamp(expires.Add(-5 * time.Minute)), ExpiresAt: model.Timestamp(expires),
 	}
-	return requester.Record{Request: request, State: "approved", Receipts: []model.Receipt{receipt}}
+	return requester.Record{Request: request, State: "approved_for_execution", Receipts: []model.Receipt{receipt}}
 }

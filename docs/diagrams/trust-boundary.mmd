@@ -6,15 +6,15 @@ flowchart TB
     Awareness["Native plugin or shared skill<br/>awareness only"]
     MCP["airlock mcp<br/>typed stdio server"]
     Requester["Requester service<br/>127.0.0.1:8787"]
-    RequestState[("Immutable requester state<br/>typed requests + sanitized receipts")]
+    RequestState[("Immutable requester state<br/>exact proposals + sanitized receipts")]
   end
 
   subgraph T["Trusted node"]
     direction LR
     Trusted["Trusted Airlock service"]
-    Adapter["Versioned local adapters<br/>and constraints"]
-    Review["Human review UI<br/>locally reconstructed action"]
-    TrustedState[("Trusted decision state")]
+    Profile["Trusted local github.command/v1 profile<br/>executable identity + fixed policy"]
+    Review["Human review UI<br/>exact proposal + resolved plan"]
+    TrustedState[("Signed approval + immutable plan<br/>one active attempt")]
   end
 
   Human["Human reviewer / operator"]
@@ -25,14 +25,14 @@ flowchart TB
   Awareness -->|"adds bounded usage guidance"| Harness
   Harness -->|"calls exactly three typed tools"| MCP
   MCP -->|"sends loopback HTTP JSON"| Requester
-  Requester -->|"persists immutable typed request"| RequestState
+  Requester -->|"persists profile, ordered argv, digest, expiry"| RequestState
   Trusted -->|"pulls pending requests"| Requester
-  Requester -->|"returns typed request and signed catalog data"| Trusted
-  Trusted -->|"checks local adapter and constraints"| Adapter
-  Trusted -->|"renders a locally reconstructed action"| Review
-  Human -->|"approves or denies exact direct-exec plan"| Review
-  Review -->|"persists trusted decision"| TrustedState
-  Review -->|"direct exec configured gh after durable reservation"| Provider
+  Requester -->|"returns hostile proposal and signed catalog data"| Trusted
+  Trusted -->|"resolves only trusted execution settings"| Profile
+  Profile -->|"produces digest-bound immutable plan"| Review
+  Human -->|"approves or denies exact resolved plan"| Review
+  Review -->|"persists approval and plan before effect"| TrustedState
+  TrustedState -->|"pinned gh + hosts.yml; Bubblewrap; trusted-only preview"| Provider
   Trusted -->|"publishes sanitized signed receipt"| Requester
   Harness -->|"polls sanitized request state"| MCP
   Verify -->|"reads ordinary external state"| Provider

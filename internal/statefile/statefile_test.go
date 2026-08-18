@@ -1,9 +1,12 @@
 package statefile
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +42,28 @@ func TestSaveIsPrivateAndLoadRejectsPermissiveState(t *testing.T) {
 	}
 }
 
+func TestSaveUsesLiteralJSONAndRefusesActualOverLimitOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private", "state.json")
+	if err := Save(path, map[string]string{"argv": strings.Repeat("<>&", 1024)}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(`\u003c`)) || bytes.Contains(raw, []byte(`\u003e`)) || bytes.Contains(raw, []byte(`\u0026`)) {
+		t.Fatalf("state JSON used HTML escaping: %q", raw[:min(len(raw), 100)])
+	}
+	before := append([]byte(nil), raw...)
+	if err := Save(path, map[string]string{"too_large": strings.Repeat("x", maxStateBytes)}); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("actual over-limit state output error=%v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("over-limit save changed existing state: err=%v", err)
+	}
+}
+
 func TestStateDirectorySymlinkRefused(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink assertion")
@@ -54,5 +79,18 @@ func TestStateDirectorySymlinkRefused(t *testing.T) {
 	}
 	if err := Save(filepath.Join(linked, "state.json"), map[string]string{"x": "y"}); err == nil {
 		t.Fatal("symlinked state directory accepted")
+	}
+}
+
+func TestLoadRejectsDuplicateStateFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"value":"first","value":"second"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var loaded struct {
+		Value string `json:"value"`
+	}
+	if err := Load(path, &loaded); err == nil {
+		t.Fatal("duplicate durable state field accepted")
 	}
 }

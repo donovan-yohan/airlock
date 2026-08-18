@@ -19,6 +19,7 @@ import (
 	"github.com/donovan-yohan/airlock/internal/config"
 	"github.com/donovan-yohan/airlock/internal/keys"
 	"github.com/donovan-yohan/airlock/internal/mcp"
+	"github.com/donovan-yohan/airlock/internal/model"
 	"github.com/donovan-yohan/airlock/internal/netguard"
 	"github.com/donovan-yohan/airlock/internal/requester"
 	"github.com/donovan-yohan/airlock/internal/trusted"
@@ -136,7 +137,8 @@ func serveTrusted(args []string) error {
 		return err
 	}
 	store, err := trusted.NewStore(cfg.StateDir, privateKey, cfg.Capabilities, requestTTL, receiptTTL, trusted.ExecutionConfig{
-		GitHubCLIPath: cfg.GitHubCLIPath, GitHubConfigDir: cfg.GitHubConfigDir, Timeout: executionTimeout,
+		GitHubCLIPath: cfg.GitHubCLIPath, GitHubConfigDir: cfg.GitHubConfigDir, SandboxCLIPath: cfg.SandboxCLIPath, Timeout: executionTimeout,
+		Profile: cfg.CatalogProfile(), ProfileConfigVersion: cfg.ProfileConfigVersion, ExecutionIdentity: cfg.ExecutionIdentityLabel,
 	})
 	if err != nil {
 		return err
@@ -205,8 +207,15 @@ func trustedRequestControl(action string, args []string) error {
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "trusted config path")
 	id := flags.String("id", "", "trusted request id")
+	planDigest := flags.String("plan-digest", "", "exact resolved plan digest shown by trusted request show")
+	confirmFullAuthority := flags.Bool("confirm-full-authority", false, "confirm this exact plan grants full configured GitHub authority")
 	if err := flags.Parse(args); err != nil || *configPath == "" || *id == "" || flags.NArg() != 0 {
-		return fmt.Errorf("usage: airlock trusted request %s --config PATH --id REQUEST_ID", action)
+		return fmt.Errorf("usage: airlock trusted request %s --config PATH --id REQUEST_ID%s", action, func() string {
+			if action == "execute" {
+				return " --plan-digest SHA256 --confirm-full-authority"
+			}
+			return ""
+		}())
 	}
 	client, err := trustedControlClient(*configPath)
 	if err != nil {
@@ -220,7 +229,13 @@ func trustedRequestControl(action string, args []string) error {
 		}
 		return printTrustedControlJSON(record)
 	case "execute":
-		result, err := client.Execute(context.Background(), *id)
+		if *planDigest == "" {
+			return errors.New("trusted execute requires --plan-digest from a fresh trusted request show")
+		}
+		if !*confirmFullAuthority {
+			return errors.New("trusted execute requires --confirm-full-authority after reviewing the exact plan")
+		}
+		result, err := client.Execute(context.Background(), *id, *planDigest, true)
 		if err != nil {
 			return err
 		}
@@ -263,14 +278,14 @@ func createRequest(args []string) error {
 	flags := flag.NewFlagSet("request create", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "requester config path")
-	capability := flags.String("capability", "", "catalog capability id")
-	action := flags.String("action", "", "typed action id")
-	repository := flags.String("repository", "", "GitHub repository name")
-	permission := flags.String("permission", "", "GitHub collaborator permission")
+	profile := flags.String("profile", "", "catalog command profile id")
+	profileVersion := flags.String("profile-version", "", "catalog command profile version")
+	var argv stringListFlag
+	flags.Var(&argv, "arg", "one exact argv element; repeat in order")
 	reason := flags.String("reason", "", "human-readable request reason")
 	ttl := flags.Duration("ttl", 10*time.Minute, "request lifetime")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *configPath == "" || *capability == "" || *action == "" || *repository == "" || *permission == "" || *reason == "" {
-		return errors.New("usage: airlock request create --config PATH --capability ID --action ACTION --repository NAME --permission pull|push --reason TEXT [--ttl 10m]")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *configPath == "" || *profile == "" || *profileVersion == "" || len(argv) == 0 || *reason == "" {
+		return errors.New("usage: airlock request create --config PATH --profile github.command --profile-version v1 --arg ARG [--arg ARG...] --reason TEXT [--ttl 10m]")
 	}
 	cfg, err := config.LoadRequester(*configPath)
 	if err != nil {
@@ -288,9 +303,14 @@ func createRequest(args []string) error {
 		return errors.New("request TTL is invalid")
 	}
 	input := requester.CreateInput{
-		CapabilityID: *capability, Action: *action,
-		Arguments: map[string]string{"repository": *repository, "permission": *permission},
-		Reason:    *reason, TTLSeconds: int64(*ttl / time.Second),
+		ProfileID: *profile, ProfileVersion: *profileVersion, Argv: append([]string(nil), argv...),
+		Reason: *reason, TTLSeconds: int64(*ttl / time.Second),
+	}
+	if err := model.ValidateArgv(input.Argv); err != nil {
+		return err
+	}
+	if err := model.ValidateCommandReason(input.Reason); err != nil {
+		return err
 	}
 	client, err := requester.NewClient("http://" + cfg.Listen)
 	if err != nil {
@@ -381,5 +401,13 @@ func serveUntilSignal(server *http.Server, listener net.Listener, background, sh
 }
 
 func usageError() error {
-	return errors.New("usage: airlock {requester serve|trusted serve|trusted requests list|trusted request show|trusted request execute|trusted request deny|request create|keygen|mcp}")
+	return errors.New("usage: airlock {requester serve|trusted serve|trusted requests list|trusted request show|trusted request execute --confirm-full-authority|trusted request deny|request create|keygen|mcp}")
+}
+
+type stringListFlag []string
+
+func (values *stringListFlag) String() string { return fmt.Sprintf("%q", []string(*values)) }
+func (values *stringListFlag) Set(value string) error {
+	*values = append(*values, value)
+	return nil
 }

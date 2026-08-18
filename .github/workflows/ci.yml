@@ -23,6 +23,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap
+      - name: Enable user namespaces on the ephemeral CI runner
+        run: |
+          # GitHub-hosted Ubuntu can disable the deployment prerequisite even
+          # though the runner VM grants passwordless sudo. Configure only this
+          # disposable job, then keep the real unprivileged bwrap preflight.
+          if [[ -e /proc/sys/kernel/unprivileged_userns_clone ]]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Bubblewrap unprivileged-userns preflight
         run: |
           bwrap --version
@@ -51,6 +62,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap
+      - name: Enable user namespaces on the ephemeral CI runner
+        run: |
+          # GitHub-hosted Ubuntu can disable the deployment prerequisite even
+          # though the runner VM grants passwordless sudo. Configure only this
+          # disposable job, then keep the real unprivileged bwrap preflight.
+          if [[ -e /proc/sys/kernel/unprivileged_userns_clone ]]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Bubblewrap unprivileged-userns preflight
         run: |
           bwrap --version

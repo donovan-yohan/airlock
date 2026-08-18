@@ -82,6 +82,8 @@ jobs:
           python3 -m unittest discover -s tests -v
           python3 tools/airlock_bootstrap.py validate
           git diff --check HEAD^ HEAD
+          install -d "$HOME/.local/bin"
+          go build -buildvcs=false -o "$HOME/.local/bin/airlock" ./cmd/airlock
           systemd-analyze --user verify deploy/systemd/airlock-requester.service
           systemd-analyze --user verify deploy/systemd/airlock-trusted.service
           ./docs/diagrams/render.sh

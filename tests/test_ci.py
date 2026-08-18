@@ -43,6 +43,10 @@ class CITests(unittest.TestCase):
         self.assertIn("bwrap --unshare-user --unshare-pid", workflow)
         self.assertIn("git diff --check HEAD^ HEAD", workflow)
         self.assertIn(
+            'go build -buildvcs=false -o "$HOME/.local/bin/airlock" ./cmd/airlock',
+            workflow,
+        )
+        self.assertIn(
             "systemd-analyze --user verify deploy/systemd/airlock-requester.service",
             workflow,
         )
